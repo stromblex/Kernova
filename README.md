@@ -1,11 +1,19 @@
-## Usage
+## Build
+
+Install the updater once, then build the loader profiles:
 
 ```bash
 cd updater
 uv sync
-uv run kernova-update build
+uv run kernova-update fabric
+uv run kernova-update neoforge
 ```
 
-Output: `builds/` | Changelogs: `changelogs/`
+Use `--force` to rebuild when the resolved mod versions did not change.
 
-If nothing changed since last build, it skips. Use `--force` to override.
+Output:
+
+- `builds/` - generated Minecraft instances with downloaded mods.
+- `changelogs/` - generated release changelogs.
+- `updater/state/version_history.json` - local build/version history.
+

@@ -18,18 +18,33 @@ def generate_changelog(manifest: BuildManifest) -> Path:
 
     available = [m for m in manifest.resolved_mods if m.available]
     skipped = [m for m in manifest.resolved_mods if not m.available]
+    listed = [m for m in manifest.resolved_mods if m.source == "list"]
+    listed_available = [m for m in listed if m.available]
+    dependencies = [m for m in manifest.resolved_mods if m.source == "dependency"]
+    dependencies_available = [m for m in dependencies if m.available]
 
     lines: list[str] = [
         f"## {manifest.build_folder}",
         "",
-        f"Minecraft {manifest.minecraft_version} | {manifest.loader} | {len(available)} mods",
+        (
+            f"Minecraft {manifest.minecraft_version} | {manifest.loader} | "
+            f"{len(listed_available)}/{len(listed)} listed mods + "
+            f"{len(dependencies_available)} dependencies = {len(available)} available"
+        ),
         "",
         "### Mods",
         "",
     ]
 
-    for m in sorted(available, key=lambda x: x.name):
+    for m in sorted(listed_available, key=lambda x: x.name):
         lines.append(f"- {m.name} {m.version_number or ''}")
+
+    if dependencies_available:
+        lines.append("")
+        lines.append("### Auto Dependencies")
+        lines.append("")
+        for m in sorted(dependencies_available, key=lambda x: x.name):
+            lines.append(f"- {m.name} {m.version_number or ''}")
 
     if skipped:
         lines.append("")

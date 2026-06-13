@@ -377,6 +377,36 @@
       "conflicts": [],
       "config_files": ["yosbr/options.txt"],
       "notes": "Ensures modpack updates do not reset user preferences."
+    },
+    {
+      "name": "VartaPack",
+      "slug": "vartapack",
+      "modrinth_id": "C1UZdEDT",
+      "category": "support",
+      "source_packs": ["kernova"],
+      "reason": "Pack integrity and support diagnostics layer. Generates player-friendly reports and validates the expected Kernova environment.",
+      "priority": "required",
+      "confidence": 95,
+      "risk": "low",
+      "dependencies": [],
+      "conflicts": [],
+      "config_files": ["vartapack/profile.json", "vartapack/rules.json", "vartapack/vartapack.json"],
+      "notes": "Updater generates the VartaPack profile for each build so Minecraft version, loader, pack version, and mod versions stay in sync."
+    },
+    {
+      "name": "PackPing",
+      "slug": "packping",
+      "modrinth_id": "ZHYSEYHD",
+      "category": "support",
+      "source_packs": ["kernova"],
+      "reason": "Client-side update notification helper for modpack releases.",
+      "priority": "required",
+      "confidence": 95,
+      "risk": "low",
+      "dependencies": [],
+      "conflicts": [],
+      "config_files": ["packping.json"],
+      "notes": "Updater writes packping.json with the current pack version for each build."
     }
   ]
 }

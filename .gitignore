@@ -1,5 +1,12 @@
 # Builds
 builds/
+publish/out/
+publish/full/
+publish/prism/
+publish/modrinth/
+publish/curseforge/
+publish/packping/
+publish/secrets.json
 
 # Python
 __pycache__/
@@ -10,6 +17,7 @@ dist/
 
 # uv
 uv.lock
+!updater/uv.lock
 
 # IDE
 .idea/

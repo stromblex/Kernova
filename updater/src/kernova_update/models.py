@@ -57,6 +57,7 @@ class BuildManifest(BaseModel):
 class VersionHistoryEntry(BaseModel):
     build_name: str = ""
     minecraft_version: str
+    loader: str = "fabric"
     pack_version: str
     timestamp: str
     mod_count: int

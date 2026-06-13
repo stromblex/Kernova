@@ -138,14 +138,16 @@ def resolve_dependencies(
                 )
                 dep_resolved = resolve_mod(dep_mod, mc_version, loader)
                 dep_resolved.source = "dependency"
+                # Fetch project name even when the dependency cannot be resolved,
+                # so skipped dependency rows are readable in the build preview.
+                proj_resp = client.get(f"/project/{dep_project_id}")
+                if proj_resp.status_code == 200:
+                    project = proj_resp.json()
+                    dep_resolved.name = project.get("title", dep_resolved.name)
+                    dep_resolved.slug = project.get("slug")
                 if dep_resolved.available:
-                    # Fetch project name
-                    proj_resp = client.get(f"/project/{dep_project_id}")
-                    if proj_resp.status_code == 200:
-                        dep_resolved.name = proj_resp.json().get("title", dep_resolved.name)
-                        dep_resolved.slug = proj_resp.json().get("slug")
-                    dep_mods.append(dep_resolved)
                     known_ids.add(dep_project_id)
+                dep_mods.append(dep_resolved)
 
     return dep_mods
 
