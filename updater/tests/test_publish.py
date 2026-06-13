@@ -181,6 +181,28 @@ class PublishTests(TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(metadata["gameVersions"], [16021, 11135, 9638, 7499])
 
+    def test_neoforge_dependency_prefix_matches_exact_minecraft_patch(self) -> None:
+        self.assertEqual(publish.neoforge_maven_prefix("1.21"), "21.0.")
+        self.assertEqual(publish.neoforge_maven_prefix("1.21.1"), "21.1.")
+        self.assertEqual(publish.neoforge_maven_prefix("26.1"), "26.1.0.")
+        self.assertEqual(publish.neoforge_maven_prefix("26.1.1"), "26.1.1.")
+        self.assertEqual(publish.neoforge_maven_prefix("26.1.2"), "26.1.2.")
+
+    def test_latest_neoforge_version_does_not_cross_patch_branches(self) -> None:
+        with patch.object(
+            publish,
+            "maven_versions",
+            return_value=[
+                "26.1.0.18-beta",
+                "26.1.0.19-beta",
+                "26.1.1.15-beta",
+                "26.1.2.76",
+            ],
+        ):
+            self.assertEqual(publish.latest_neoforge_version("26.1"), "26.1.0.19-beta")
+            self.assertEqual(publish.latest_neoforge_version("26.1.1"), "26.1.1.15-beta")
+            self.assertEqual(publish.latest_neoforge_version("26.1.2"), "26.1.2.76")
+
     def test_release_stops_before_real_upload_when_dry_run_fails(self) -> None:
         args = Namespace(
             build=None,

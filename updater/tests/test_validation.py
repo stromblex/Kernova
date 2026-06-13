@@ -155,3 +155,31 @@ class ValidationTests(TestCase):
                 issues = validation.validate_modrinth_artifacts()
 
         self.assertTrue(any("Missing fabric-loader dependency" in issue.message for issue in issues))
+
+    def test_modrinth_artifact_validation_rejects_neoforge_patch_mismatch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            modrinth_dir = Path(tmp) / "modrinth"
+            artifact = modrinth_dir / "26.1" / "neoforge" / "test" / "test.mrpack"
+            artifact.parent.mkdir(parents=True)
+            with zipfile.ZipFile(artifact, "w") as archive:
+                archive.writestr(
+                    "modrinth.index.json",
+                    json.dumps(
+                        {
+                            "dependencies": {"minecraft": "26.1", "neoforge": "26.1.2.76"},
+                            "files": [
+                                {
+                                    "path": "mods/a.jar",
+                                    "downloads": ["https://example.invalid/a.jar"],
+                                    "hashes": {"sha1": "abc"},
+                                    "fileSize": 1,
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+            with patch.object(validation, "MODRINTH_DIR", modrinth_dir):
+                issues = validation.validate_modrinth_artifacts()
+
+        self.assertTrue(any("expected 26.1.0.*" in issue.message for issue in issues))

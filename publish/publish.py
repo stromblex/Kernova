@@ -363,21 +363,29 @@ def auto_loader_dependency(dependency: str, mc: str) -> str:
 
 
 def latest_neoforge_version(mc: str) -> str:
+    prefix = neoforge_maven_prefix(mc)
+    if not prefix:
+        return ""
+    versions = maven_versions(
+        "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+    )
+    matches = [version for version in versions if version.startswith(prefix)]
+    return sorted(matches, key=version_sort_key)[-1] if matches else ""
+
+
+def neoforge_maven_prefix(mc: str) -> str:
     parts = mc.split(".")
     if len(parts) < 2:
         return ""
     if parts[0] == "1":
         minecraft_minor = parts[1]
         minecraft_patch = parts[2] if len(parts) > 2 else "0"
+        return f"{minecraft_minor}.{minecraft_patch}."
     else:
-        minecraft_minor = parts[0]
-        minecraft_patch = parts[1] if len(parts) > 1 else "0"
-    prefix = f"{minecraft_minor}.{minecraft_patch}."
-    versions = maven_versions(
-        "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
-    )
-    matches = [version for version in versions if version.startswith(prefix)]
-    return sorted(matches, key=version_sort_key)[-1] if matches else ""
+        minecraft_major = parts[0]
+        minecraft_minor = parts[1]
+        minecraft_patch = parts[2] if len(parts) > 2 else "0"
+        return f"{minecraft_major}.{minecraft_minor}.{minecraft_patch}."
 
 
 def latest_maven_version(url: str) -> str:

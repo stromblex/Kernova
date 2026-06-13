@@ -227,6 +227,17 @@ def validate_modrinth_artifacts() -> list[ValidationIssue]:
             issues.append(_error(artifact, "Missing fabric-loader dependency."))
         elif loader == "neoforge" and not dependencies.get("neoforge"):
             issues.append(_error(artifact, "Missing neoforge dependency."))
+        elif loader == "neoforge" and minecraft:
+            neoforge = str(dependencies.get("neoforge", ""))
+            expected_prefix = _expected_neoforge_prefix(str(minecraft))
+            if expected_prefix and not neoforge.startswith(expected_prefix):
+                issues.append(
+                    _error(
+                        artifact,
+                        f"NeoForge dependency {neoforge} does not match Minecraft {minecraft}; "
+                        f"expected {expected_prefix}*.",
+                    )
+                )
 
         files = index.get("files", [])
         if not files:
@@ -354,6 +365,20 @@ def _loader_from_artifact_path(path: Path) -> str:
     if "neoforge" in parts:
         return "neoforge"
     return ""
+
+
+def _expected_neoforge_prefix(minecraft: str) -> str:
+    parts = minecraft.split(".")
+    if len(parts) < 2:
+        return ""
+    if parts[0] == "1":
+        minor = parts[1]
+        patch = parts[2] if len(parts) > 2 else "0"
+        return f"{minor}.{patch}."
+    major = parts[0]
+    minor = parts[1]
+    patch = parts[2] if len(parts) > 2 else "0"
+    return f"{major}.{minor}.{patch}."
 
 
 def _error(path: Path, message: str) -> ValidationIssue:

@@ -1,6 +1,6 @@
 [project]
 name = "kernova-update"
-version = "0.1.0b0"
+version = "0.1.1b0"
 description = "Terminal updater for Kernova modpack"
 requires-python = ">=3.12"
 dependencies = [
