@@ -26,7 +26,7 @@
   },
   "modrinth": {
     "project_id": "XiPInj7R",
-    "version_type": "release",
+    "version_type": "auto",
     "featured": true,
     "client_side": "required",
     "server_side": "unsupported",
@@ -50,7 +50,7 @@
   },
   "curseforge": {
     "project_id": "1573362",
-    "release_type": "release",
+    "release_type": "auto",
     "game_versions": [],
     "minecraft_versions": {
       "26.1": 15933,

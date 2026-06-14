@@ -37,6 +37,7 @@ PRISM_DIR = SCRIPT_DIR / "prism"
 PACKPING_DIR = SCRIPT_DIR / "packping"
 CURSEFORGE_FINGERPRINTS_URL = "https://api.curseforge.com/v1/fingerprints"
 CURSEFORGE_FINGERPRINT_WHITESPACE = {9, 10, 13, 32}
+PUBLISH_CHANNELS = {"release", "beta", "alpha"}
 
 
 def load_json(path: Path, default: Any | None = None) -> Any:
@@ -424,6 +425,18 @@ def version_sort_key(version: str) -> tuple[tuple[int, int | str], ...]:
     return tuple((0, int(piece)) if piece.isdigit() else (1, piece) for piece in pieces)
 
 
+def pack_version_channel(pack_version: str) -> str:
+    channel = pack_version.rsplit("-", 1)[-1].lower() if "-" in pack_version else "release"
+    return channel if channel in PUBLISH_CHANNELS else "release"
+
+
+def publish_release_type(manifest: dict[str, Any], platform_config: dict[str, Any], key: str) -> str:
+    configured = str(platform_config.get(key, "auto") or "auto").lower()
+    if configured == "auto":
+        return pack_version_channel(str(manifest.get("pack_version", "")))
+    return configured
+
+
 def dedupe_ints(values: list[Any]) -> list[int]:
     out: list[int] = []
     seen: set[int] = set()
@@ -472,7 +485,7 @@ def curseforge_upload_metadata(
         "changelogType": "markdown",
         "displayName": build_display_name(manifest),
         "gameVersions": game_versions,
-        "releaseType": cf["release_type"],
+        "releaseType": publish_release_type(manifest, cf, "release_type"),
     }
     if not game_versions:
         missing.append("CurseForge gameVersions")
@@ -1317,7 +1330,7 @@ def upload_modrinth(
         "changelog": changelog,
         "dependencies": [],
         "game_versions": [manifest["minecraft_version"]],
-        "version_type": config["modrinth"]["version_type"],
+        "version_type": publish_release_type(manifest, config["modrinth"], "version_type"),
         "loaders": config["modrinth"]["loaders"][manifest["loader"]],
         "featured": config["modrinth"]["featured"],
         "project_id": project_id,

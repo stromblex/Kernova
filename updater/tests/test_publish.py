@@ -343,6 +343,75 @@ class PublishTests(TestCase):
 
         self.assertEqual(missing, [])
         self.assertEqual(metadata["gameVersions"], [16021, 11135, 9638, 7499])
+        self.assertEqual(metadata["releaseType"], "beta")
+
+    def test_curseforge_release_type_auto_uses_pack_version_channel(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v0.1.0-beta",
+            "pack_version": "0.1.0-beta",
+        }
+        config = {
+            "curseforge": {
+                "release_type": "auto",
+                "game_versions": [],
+                "minecraft_versions": {"26.1": 15933},
+                "java_versions": [],
+                "environment": [],
+                "loaders": {"fabric": [7499]},
+            }
+        }
+        with TemporaryDirectory() as tmp:
+            changelog = Path(tmp) / "changelog.md"
+            changelog.write_text("changes")
+            with patch.object(publish, "changelog_path", return_value=changelog):
+                metadata, missing = publish.curseforge_upload_metadata(
+                    manifest,
+                    config,
+                    {},
+                    allow_network=False,
+                )
+
+        self.assertEqual(missing, [])
+        self.assertEqual(metadata["releaseType"], "beta")
+
+    def test_modrinth_version_type_auto_uses_pack_version_channel(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v0.1.0-beta",
+            "pack_version": "0.1.0-beta",
+        }
+        config = {
+            "modrinth": {
+                "project_id": "project",
+                "version_type": "auto",
+                "loaders": {"fabric": ["fabric"]},
+                "featured": True,
+            }
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / f"{publish.artifact_slug(manifest)}.mrpack"
+            artifact.write_text("pack")
+            changelog = root / "changelog.md"
+            changelog.write_text("changes")
+            with (
+                patch.object(publish, "platform_dir", return_value=root),
+                patch.object(publish, "changelog_path", return_value=changelog),
+                patch.object(publish, "post_multipart", return_value=(200, "ok")) as post_multipart,
+            ):
+                ok = publish.upload_modrinth(
+                    manifest,
+                    config,
+                    {"modrinth_token": "token"},
+                    dry_run=False,
+                )
+
+        self.assertTrue(ok)
+        data = json.loads(post_multipart.call_args.args[2]["data"])
+        self.assertEqual(data["version_type"], "beta")
 
     def test_neoforge_dependency_prefix_matches_exact_minecraft_patch(self) -> None:
         self.assertEqual(publish.neoforge_maven_prefix("1.21"), "21.0.")
