@@ -283,15 +283,15 @@ def read_manual_notes(manifest: dict[str, Any], notes_file: str | None) -> str:
     candidates.append(SCRIPT_DIR / "notes" / f"{manifest['minecraft_version']}-{manifest['loader']}.md")
     candidates.append(SCRIPT_DIR / "notes" / f"{manifest['minecraft_version']}.md")
 
+    for path in candidates:
+        if path.exists():
+            return strip_heading(path.read_text()).strip()
+
     build_changelog = CHANGELOGS_DIR / f"{build_display_name(manifest)}.md"
     if build_changelog.exists():
         extracted = extract_release_notes(build_changelog.read_text())
         if extracted:
             return extracted
-
-    for path in candidates:
-        if path.exists():
-            return strip_heading(path.read_text()).strip()
     return ""
 
 
@@ -1557,6 +1557,11 @@ def sync_modrinth_project_metadata(config: dict[str, Any], token: str, dry_run: 
         print("[ERROR] Modrinth project_id/token is not configured.")
         return False
 
+    current = fetch_modrinth_project_metadata(project_id)
+    if current and modrinth_project_metadata_matches(current, metadata):
+        print(f"[OK] Modrinth project side metadata already set: {metadata}")
+        return True
+
     status, body = patch_json(
         f"https://api.modrinth.com/v2/project/{urllib.parse.quote(project_id, safe='')}",
         {"Authorization": token},
@@ -1567,6 +1572,21 @@ def sync_modrinth_project_metadata(config: dict[str, Any], token: str, dry_run: 
         return True
     print(f"[ERROR] Modrinth project metadata {status}: {body}")
     return False
+
+
+def fetch_modrinth_project_metadata(project_id: str) -> dict[str, Any] | None:
+    url = f"https://api.modrinth.com/v2/project/{urllib.parse.quote(project_id, safe='')}"
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def modrinth_project_metadata_matches(current: dict[str, Any], desired: dict[str, str]) -> bool:
+    return all(str(current.get(key) or "").strip().lower() == value for key, value in desired.items())
 
 
 def upload_curseforge(

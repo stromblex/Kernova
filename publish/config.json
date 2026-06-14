@@ -72,7 +72,7 @@
       "26.1": 83806
     },
     "java_versions": [],
-    "environment": [9638],
+    "environment": [],
     "loaders": {
       "fabric": [7499],
       "neoforge": [10150]
