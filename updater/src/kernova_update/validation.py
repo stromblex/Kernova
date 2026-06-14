@@ -281,8 +281,32 @@ def validate_curseforge_artifacts() -> list[ValidationIssue]:
             issues.append(_error(artifact, "CurseForge manifest is missing minecraft.modLoaders."))
         if "overrides" not in manifest:
             issues.append(_error(artifact, "CurseForge manifest is missing overrides field."))
-        elif not any(name.startswith(f"{manifest['overrides'].rstrip('/')}/") for name in names):
-            issues.append(_error(artifact, f"CurseForge overrides folder '{manifest['overrides']}' is missing."))
+            overrides = ""
+        else:
+            overrides = str(manifest["overrides"]).rstrip("/")
+            if not any(name.startswith(f"{overrides}/") for name in names):
+                issues.append(_error(artifact, f"CurseForge overrides folder '{manifest['overrides']}' is missing."))
+
+        files = manifest.get("files")
+        if not isinstance(files, list) or not files:
+            issues.append(_error(artifact, "CurseForge manifest files list must reference mod project/file ids."))
+        else:
+            for item in files:
+                if not isinstance(item, dict) or not item.get("projectID") or not item.get("fileID"):
+                    issues.append(_error(artifact, "CurseForge manifest contains an incomplete file entry."))
+
+        if overrides:
+            embedded_mod_jars = sorted(
+                name for name in names
+                if name.startswith(f"{overrides}/mods/") and name.lower().endswith(".jar")
+            )
+            if embedded_mod_jars:
+                issues.append(
+                    _error(
+                        artifact,
+                        "CurseForge modpack zip embeds mod jars in overrides/mods instead of manifest files.",
+                    )
+                )
     return issues
 
 

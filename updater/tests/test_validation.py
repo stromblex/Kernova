@@ -196,3 +196,32 @@ class ValidationTests(TestCase):
                 issues = validation.validate_curseforge_artifacts()
 
         self.assertTrue(any("manifest.json" in issue.message for issue in issues))
+
+    def test_curseforge_artifact_validation_rejects_embedded_mod_jars(self) -> None:
+        with TemporaryDirectory() as tmp:
+            curseforge_dir = Path(tmp) / "curseforge"
+            artifact = curseforge_dir / "26.1" / "fabric" / "test" / "test-curseforge.zip"
+            artifact.parent.mkdir(parents=True)
+            with zipfile.ZipFile(artifact, "w") as archive:
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(
+                        {
+                            "manifestType": "minecraftModpack",
+                            "manifestVersion": 1,
+                            "minecraft": {
+                                "version": "26.1",
+                                "modLoaders": [{"id": "fabric-0.19.3", "primary": True}],
+                            },
+                            "files": [{"projectID": 1234, "fileID": 5678, "required": True}],
+                            "overrides": "overrides",
+                        }
+                    ),
+                )
+                archive.writestr("overrides/config/test.json", "{}")
+                archive.writestr("overrides/mods/example.jar", "jar")
+
+            with patch.object(validation, "CURSEFORGE_DIR", curseforge_dir):
+                issues = validation.validate_curseforge_artifacts()
+
+        self.assertTrue(any("embeds mod jars" in issue.message for issue in issues))

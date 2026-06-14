@@ -42,10 +42,19 @@ class PublishTests(TestCase):
             "loader": "fabric",
             "build_folder": "Kernova fabric 26.1 v1.0.0-release",
             "pack_version": "1.0.0-release",
+            "resolved_mods": [
+                {
+                    "name": "Example",
+                    "slug": "example",
+                    "filename": "example.jar",
+                    "available": True,
+                }
+            ],
         }
         config = {
             "author": "stromblex",
             "icon": "",
+            "curseforge": {},
             "modrinth": {
                 "loader_dependencies": {"fabric": {"fabric-loader": "0.19.3"}},
             },
@@ -60,18 +69,134 @@ class PublishTests(TestCase):
             (build_dir / "mods" / "example.jar").write_text("jar")
             (build_dir / "build_manifest.json").write_text("{}")
 
-            artifact = publish.create_curseforge_modpack_zip(build_dir, manifest, config, out_dir)
+            fingerprint = publish.curseforge_file_fingerprint(build_dir / "mods" / "example.jar")
+            with patch.object(
+                publish,
+                "curseforge_fingerprint_matches",
+                return_value={
+                    fingerprint: {
+                        "projectID": 1234,
+                        "fileID": 5678,
+                        "required": True,
+                        "isLocked": False,
+                    }
+                },
+            ):
+                artifact = publish.create_curseforge_modpack_zip(
+                    build_dir,
+                    manifest,
+                    config,
+                    out_dir,
+                    {"curseforge_token": "token"},
+                )
 
             with zipfile.ZipFile(artifact) as archive:
                 names = set(archive.namelist())
                 cf_manifest = json.loads(archive.read("manifest.json"))
 
         self.assertIn("manifest.json", names)
+        self.assertIn("modlist.html", names)
         self.assertIn("overrides/config/packping.json", names)
-        self.assertIn("overrides/mods/example.jar", names)
+        self.assertNotIn("overrides/mods/example.jar", names)
         self.assertNotIn("overrides/build_manifest.json", names)
         self.assertEqual(cf_manifest["manifestType"], "minecraftModpack")
         self.assertEqual(cf_manifest["minecraft"]["modLoaders"][0]["id"], "fabric-0.19.3")
+        self.assertEqual(
+            cf_manifest["files"],
+            [
+                {
+                    "projectID": 1234,
+                    "fileID": 5678,
+                    "required": True,
+                    "isLocked": False,
+                }
+            ],
+        )
+
+    def test_create_curseforge_zip_fails_when_mod_jar_cannot_be_matched(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+            "resolved_mods": [
+                {
+                    "name": "Example",
+                    "filename": "example.jar",
+                    "available": True,
+                }
+            ],
+        }
+        config = {
+            "author": "stromblex",
+            "icon": "",
+            "curseforge": {},
+            "modrinth": {
+                "loader_dependencies": {"fabric": {"fabric-loader": "0.19.3"}},
+            },
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build"
+            out_dir = root / "out"
+            (build_dir / "mods").mkdir(parents=True)
+            (build_dir / "mods" / "example.jar").write_text("jar")
+
+            with patch.object(publish, "curseforge_fingerprint_matches", return_value={}):
+                with self.assertRaisesRegex(ValueError, "Could not match every mod jar"):
+                    publish.create_curseforge_modpack_zip(
+                        build_dir,
+                        manifest,
+                        config,
+                        out_dir,
+                        {"curseforge_token": "token"},
+                    )
+
+    def test_create_curseforge_zip_uses_configured_file_override_without_api(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+            "resolved_mods": [
+                {
+                    "name": "Example",
+                    "modrinth_id": "modrinth-example",
+                    "filename": "example.jar",
+                    "available": True,
+                }
+            ],
+        }
+        config = {
+            "author": "stromblex",
+            "icon": "",
+            "curseforge": {
+                "file_overrides": {
+                    "modrinth-example": {"projectID": 4321, "fileID": 8765},
+                },
+            },
+            "modrinth": {
+                "loader_dependencies": {"fabric": {"fabric-loader": "0.19.3"}},
+            },
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build"
+            out_dir = root / "out"
+            (build_dir / "mods").mkdir(parents=True)
+            (build_dir / "mods" / "example.jar").write_text("jar")
+
+            with patch.object(publish, "curseforge_fingerprint_matches") as fingerprint_matches:
+                artifact = publish.create_curseforge_modpack_zip(build_dir, manifest, config, out_dir)
+
+            with zipfile.ZipFile(artifact) as archive:
+                names = set(archive.namelist())
+                cf_manifest = json.loads(archive.read("manifest.json"))
+
+        fingerprint_matches.assert_not_called()
+        self.assertNotIn("overrides/mods/example.jar", names)
+        self.assertEqual(cf_manifest["files"][0]["projectID"], 4321)
+        self.assertEqual(cf_manifest["files"][0]["fileID"], 8765)
 
     def test_curseforge_dry_run_upload_uses_modpack_zip_mode(self) -> None:
         manifest = {

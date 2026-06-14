@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import html
 import hashlib
 import json
 import mimetypes
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -33,6 +35,8 @@ CURSEFORGE_DIR = SCRIPT_DIR / "curseforge"
 FULL_DIR = SCRIPT_DIR / "full"
 PRISM_DIR = SCRIPT_DIR / "prism"
 PACKPING_DIR = SCRIPT_DIR / "packping"
+CURSEFORGE_FINGERPRINTS_URL = "https://api.curseforge.com/v1/fingerprints"
+CURSEFORGE_FINGERPRINT_WHITESPACE = {9, 10, 13, 32}
 
 
 def load_json(path: Path, default: Any | None = None) -> Any:
@@ -163,12 +167,15 @@ def iter_override_files(build_dir: Path) -> list[Path]:
     return sorted(out)
 
 
-def iter_curseforge_override_files(build_dir: Path) -> list[Path]:
+def iter_curseforge_override_files(build_dir: Path, excluded_paths: set[Path] | None = None) -> list[Path]:
+    excluded = {path.resolve() for path in (excluded_paths or set())}
     out: list[Path] = []
     for path in build_dir.rglob("*"):
         if not path.is_file():
             continue
         if path.name == "build_manifest.json":
+            continue
+        if path.resolve() in excluded:
             continue
         out.append(path)
     return sorted(out)
@@ -557,6 +564,250 @@ def fetch_curseforge_api_json(url: str, token: str) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def curseforge_fingerprint_api_key(secrets: dict[str, Any] | None) -> str:
+    values = secrets or {}
+    return str(
+        values.get("curseforge_core_api_key")
+        or values.get("curseforge_api_key")
+        or values.get("curseforge_token")
+        or ""
+    ).strip()
+
+
+def curseforge_file_fingerprint(path: Path) -> int:
+    data = bytes(byte for byte in path.read_bytes() if byte not in CURSEFORGE_FINGERPRINT_WHITESPACE)
+    return murmur2_unsigned(data)
+
+
+def murmur2_unsigned(data: bytes, seed: int = 1) -> int:
+    """CurseForge Core API uses the Minecraft MurmurHash2 file fingerprint."""
+    m = 0x5BD1E995
+    r = 24
+    length = len(data)
+    h = (seed ^ length) & 0xFFFFFFFF
+
+    rounded_end = length & ~3
+    for offset in range(0, rounded_end, 4):
+        k = int.from_bytes(data[offset:offset + 4], "little")
+        k = (k * m) & 0xFFFFFFFF
+        k ^= (k & 0xFFFFFFFF) >> r
+        k = (k * m) & 0xFFFFFFFF
+
+        h = (h * m) & 0xFFFFFFFF
+        h ^= k
+
+    tail = data[rounded_end:]
+    if len(tail) == 3:
+        h ^= tail[2] << 16
+    if len(tail) >= 2:
+        h ^= tail[1] << 8
+    if len(tail) >= 1:
+        h ^= tail[0]
+        h = (h * m) & 0xFFFFFFFF
+
+    h ^= (h & 0xFFFFFFFF) >> 13
+    h = (h * m) & 0xFFFFFFFF
+    h ^= (h & 0xFFFFFFFF) >> 15
+    return h & 0xFFFFFFFF
+
+
+def curseforge_fingerprint_matches(fingerprints: list[int], token: str) -> dict[int, dict[str, Any]]:
+    if not fingerprints:
+        return {}
+    if not token:
+        raise ValueError(curseforge_fingerprint_auth_message())
+
+    body = json.dumps({"fingerprints": fingerprints}).encode("utf-8")
+    request = urllib.request.Request(
+        CURSEFORGE_FINGERPRINTS_URL,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "x-api-key": token,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            raise ValueError(curseforge_fingerprint_auth_message()) from error
+        raise
+
+    data = payload.get("data", payload)
+    exact_matches = data.get("exactMatches", []) if isinstance(data, dict) else []
+    matches: dict[int, dict[str, Any]] = {}
+    for match in exact_matches:
+        parsed = parse_curseforge_fingerprint_match(match)
+        if parsed:
+            fingerprint, entry = parsed
+            matches[fingerprint] = entry
+    return matches
+
+
+def curseforge_fingerprint_auth_message() -> str:
+    return (
+        "CurseForge Core API key is required to build a publishable modpack manifest. "
+        "The legacy upload token is not always accepted by the fingerprint API. "
+        "Add curseforge_core_api_key to publish/secrets.json, or provide explicit "
+        "CurseForge project/file ids before packaging."
+    )
+
+
+def parse_curseforge_fingerprint_match(match: Any) -> tuple[int, dict[str, Any]] | None:
+    if not isinstance(match, dict):
+        return None
+    file_data = match.get("file") if isinstance(match.get("file"), dict) else {}
+    fingerprint = first_int(
+        file_data.get("fileFingerprint"),
+        file_data.get("packageFingerprint"),
+        match.get("fingerprint"),
+        match.get("fileFingerprint"),
+    )
+    project_id = first_int(
+        file_data.get("modId"),
+        file_data.get("modID"),
+        file_data.get("projectId"),
+        file_data.get("projectID"),
+        match.get("modId"),
+        match.get("modID"),
+        match.get("projectId"),
+        match.get("projectID"),
+        match.get("id"),
+    )
+    file_id = first_int(
+        file_data.get("id"),
+        file_data.get("fileId"),
+        file_data.get("fileID"),
+        match.get("fileId"),
+        match.get("fileID"),
+    )
+    if fingerprint is None or project_id is None or file_id is None:
+        return None
+    entry = {
+        "projectID": project_id,
+        "fileID": file_id,
+        "required": True,
+        "isLocked": False,
+    }
+    filename = file_data.get("fileName") or file_data.get("displayName")
+    if filename:
+        entry["_filename"] = str(filename)
+    return fingerprint, entry
+
+
+def first_int(*values: Any) -> int | None:
+    for value in values:
+        try:
+            if value is not None and value != "":
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def configured_curseforge_file_entry(mod: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    overrides = config.get("curseforge", {}).get("file_overrides", {})
+    if not isinstance(overrides, dict):
+        return None
+
+    keys = [
+        mod.get("modrinth_id"),
+        mod.get("slug"),
+        mod.get("filename"),
+        mod.get("name"),
+    ]
+    for key in keys:
+        if not key:
+            continue
+        value = overrides.get(str(key))
+        if isinstance(value, dict):
+            return clean_curseforge_file_entry(value)
+    return None
+
+
+def clean_curseforge_file_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    project_id = first_int(
+        entry.get("projectID"),
+        entry.get("projectId"),
+        entry.get("project_id"),
+        entry.get("modId"),
+        entry.get("modID"),
+    )
+    file_id = first_int(entry.get("fileID"), entry.get("fileId"), entry.get("file_id"), entry.get("id"))
+    if project_id is None or file_id is None:
+        raise ValueError("CurseForge file override must include projectID and fileID.")
+    return {
+        "projectID": project_id,
+        "fileID": file_id,
+        "required": bool(entry.get("required", True)),
+        "isLocked": bool(entry.get("isLocked", False)),
+    }
+
+
+def curseforge_modpack_file_entries(
+    build_dir: Path,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    secrets: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], set[Path]]:
+    mod_paths: list[tuple[dict[str, Any], Path, int]] = []
+    entries: list[dict[str, Any]] = []
+    excluded_paths: set[Path] = set()
+    seen_entries: set[tuple[int, int]] = set()
+    for mod in available_mods(manifest):
+        filename = mod.get("filename")
+        if not filename:
+            continue
+        jar_path = build_dir / "mods" / filename
+        if not jar_path.exists():
+            continue
+        configured_entry = configured_curseforge_file_entry(mod, config)
+        if configured_entry:
+            key = (configured_entry["projectID"], configured_entry["fileID"])
+            if key not in seen_entries:
+                seen_entries.add(key)
+                entries.append(configured_entry)
+            excluded_paths.add(jar_path)
+            continue
+        mod_paths.append((mod, jar_path, curseforge_file_fingerprint(jar_path)))
+
+    if not mod_paths:
+        return sorted(entries, key=lambda item: (item["projectID"], item["fileID"])), excluded_paths
+
+    fingerprints = [fingerprint for _, _, fingerprint in mod_paths]
+    matches = curseforge_fingerprint_matches(fingerprints, curseforge_fingerprint_api_key(secrets))
+    allow_unmatched = bool(config.get("curseforge", {}).get("allow_unmatched_override_mods", False))
+
+    unmatched: list[str] = []
+    for mod, jar_path, fingerprint in mod_paths:
+        entry = matches.get(fingerprint)
+        if not entry:
+            unmatched.append(f"{mod.get('name') or jar_path.name} ({jar_path.name})")
+            continue
+
+        cleaned = clean_curseforge_file_entry(entry)
+        key = (cleaned["projectID"], cleaned["fileID"])
+        if key not in seen_entries:
+            seen_entries.add(key)
+            entries.append(cleaned)
+        excluded_paths.add(jar_path)
+
+    if unmatched and not allow_unmatched:
+        listed = "\n".join(f"  - {item}" for item in unmatched)
+        raise ValueError(
+            "Could not match every mod jar to a CurseForge project/file. "
+            "CurseForge-hosted mods must be referenced in manifest.json, not embedded in overrides/mods.\n"
+            f"{listed}\n"
+            "If a listed mod is an approved Non-CurseForge override mod, set "
+            "curseforge.allow_unmatched_override_mods=true in publish/config.json."
+        )
+
+    return sorted(entries, key=lambda item: (item["projectID"], item["fileID"])), excluded_paths
+
+
 def create_full_zip(build_dir: Path, manifest: dict[str, Any], out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = out_dir / f"{artifact_slug(manifest)}-full.zip"
@@ -572,10 +823,12 @@ def create_curseforge_modpack_zip(
     manifest: dict[str, Any],
     config: dict[str, Any],
     out_dir: Path,
+    secrets: dict[str, Any] | None = None,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = out_dir / f"{artifact_slug(manifest)}-curseforge.zip"
     loader_dependencies = resolve_loader_dependencies(manifest, config)
+    files, excluded_mod_paths = curseforge_modpack_file_entries(build_dir, manifest, config, secrets)
     cf_manifest = {
         "minecraft": {
             "version": manifest["minecraft_version"],
@@ -591,18 +844,35 @@ def create_curseforge_modpack_zip(
         "name": build_display_name(manifest),
         "version": manifest["pack_version"],
         "author": config.get("author", ""),
-        "files": [],
+        "files": files,
         "overrides": "overrides",
     }
 
     with zipfile.ZipFile(artifact, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(cf_manifest, indent=2) + "\n")
+        zf.writestr("modlist.html", curseforge_modlist_html(manifest))
         write_icon(zf, config, "overrides/icon.png")
-        for path in iter_curseforge_override_files(build_dir):
+        for path in iter_curseforge_override_files(build_dir, excluded_mod_paths):
             rel = path.relative_to(build_dir)
             zf.write(path, f"overrides/{rel.as_posix()}")
 
     return artifact
+
+
+def curseforge_modlist_html(manifest: dict[str, Any]) -> str:
+    lines = ["<ul>"]
+    for mod in sorted(available_mods(manifest), key=lambda item: str(item.get("name", "")).lower()):
+        name = html.escape(str(mod.get("name") or mod.get("filename") or "Unknown mod"))
+        slug = mod.get("slug")
+        if slug:
+            url = "https://www.curseforge.com/minecraft/search?" + urllib.parse.urlencode(
+                {"search": str(slug)}
+            )
+            lines.append(f'<li><a href="{html.escape(url)}">{name}</a></li>')
+        else:
+            lines.append(f"<li>{name}</li>")
+    lines.append("</ul>")
+    return "\n".join(lines) + "\n"
 
 
 def curseforge_modloader_id(manifest: dict[str, Any], loader_dependencies: dict[str, str]) -> str:
@@ -915,6 +1185,7 @@ def build_dirs_from_args(args: argparse.Namespace) -> list[Path]:
 
 
 def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_dir: Path) -> None:
+    secrets = load_json(SECRETS_PATH, default={})
     manifest = load_manifest(build_dir)
 
     modrinth_dir = platform_dir(MODRINTH_DIR, manifest)
@@ -928,7 +1199,13 @@ def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_di
     changelog_file.write_text(changelog)
 
     mrpack = create_mrpack(build_dir, manifest, config, modrinth_dir)
-    curseforge_zip = create_curseforge_modpack_zip(build_dir, manifest, config, platform_dir(CURSEFORGE_DIR, manifest))
+    curseforge_zip = create_curseforge_modpack_zip(
+        build_dir,
+        manifest,
+        config,
+        platform_dir(CURSEFORGE_DIR, manifest),
+        secrets,
+    )
     full_zip = create_full_zip(build_dir, manifest, full_dir)
     prism_zip = create_prism_zip(build_dir, manifest, config, prism_dir)
     packping_entry = create_packping_entry(manifest, config, packping_dir, mrpack.name, changelog)
@@ -943,8 +1220,13 @@ def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_di
 
 def package_build(args: argparse.Namespace) -> int:
     config = load_json(CONFIG_PATH)
-    for build_dir in build_dirs_from_args(args):
-        package_one_build(args, config, build_dir)
+    try:
+        build_dirs = build_dirs_from_args(args)
+        for build_dir in build_dirs:
+            package_one_build(args, config, build_dir)
+    except ValueError as error:
+        print(f"[ERROR] {error}")
+        return 1
     if args.sync_update:
         return sync_update_json(args, config)
     return 0
@@ -1330,17 +1612,21 @@ def main() -> int:
     sync_parser.add_argument("--init-repo", action="store_true", help="Initialize remote update repo if it is missing .git")
 
     args = parser.parse_args()
-    if args.command == "package":
-        return package_build(args)
-    if args.command == "upload":
-        return upload_build(args)
-    if args.command == "all":
-        code = package_build(args)
-        return code if code else upload_build(args)
-    if args.command == "release":
-        return release_build(args)
-    if args.command == "sync-update":
-        return sync_update_json(args)
+    try:
+        if args.command == "package":
+            return package_build(args)
+        if args.command == "upload":
+            return upload_build(args)
+        if args.command == "all":
+            code = package_build(args)
+            return code if code else upload_build(args)
+        if args.command == "release":
+            return release_build(args)
+        if args.command == "sync-update":
+            return sync_update_json(args)
+    except ValueError as error:
+        print(f"[ERROR] {error}")
+        return 1
     return 2
 
 
