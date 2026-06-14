@@ -9,6 +9,8 @@ import os
 import shutil
 import subprocess
 import tomllib
+import urllib.error
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +18,17 @@ from pathlib import Path
 from .models import ResolvedMod
 
 DEFAULT_PACKPING_UPDATE_URL = "https://stromblex.github.io/kernova-update/update.modrinth.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+DOCTOR_CLASS = "com.stromblex.vartapack.doctor.DoctorCli"
+DOCTOR_CLASS_FILE = "com/stromblex/vartapack/doctor/DoctorCli.class"
+DOCTOR_GSON_VERSION = "2.11.0"
+DOCTOR_GSON_FILE = f"gson-{DOCTOR_GSON_VERSION}.jar"
+DOCTOR_GSON_URL = (
+    "https://repo.maven.apache.org/maven2/com/google/code/gson/gson/"
+    f"{DOCTOR_GSON_VERSION}/{DOCTOR_GSON_FILE}"
+)
+DOCTOR_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+DOCTOR_CACHE_DIR = PROJECT_ROOT / "updater" / ".cache" / "doctor"
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,8 @@ def run_vartapack_doctor(build_dir: Path, resolved: list[ResolvedMod]) -> Doctor
     if not jar_path.exists():
         return DoctorRun("skipped", f"VartaPack jar not found: {jar_path.name}")
 
+    required_java = _doctor_required_java(jar_path)
+    classpath = _doctor_classpath(jar_path)
     old_java_seen = False
     java_seen = False
     for java_bin in _java_candidates():
@@ -80,8 +95,8 @@ def run_vartapack_doctor(build_dir: Path, resolved: list[ResolvedMod]) -> Doctor
         command = [
             str(java_bin),
             "-cp",
-            str(jar_path),
-            "com.stromblex.vartapack.doctor.DoctorCli",
+            classpath,
+            DOCTOR_CLASS,
             "--instance",
             str(build_dir),
             "--json",
@@ -106,14 +121,17 @@ def run_vartapack_doctor(build_dir: Path, resolved: list[ResolvedMod]) -> Doctor
         if "UnsupportedClassVersionError" in error:
             old_java_seen = True
             continue
+        if _java_runtime_failure(error):
+            return DoctorRun("error", _doctor_runtime_failure_message(error, required_java))
         if result.returncode == 1:
             return DoctorRun("warning", _doctor_summary(output, "Doctor found warnings."))
         return DoctorRun("error", _doctor_summary(output, error or f"Doctor exited with {result.returncode}."))
 
     if old_java_seen:
+        required = f" Java {required_java}+" if required_java else " a newer Java runtime"
         return DoctorRun(
             "skipped",
-            "No new enough Java runtime was found for the downloaded VartaPack jar.",
+            f"VartaPack Doctor requires{required}. Set KERNOVA_DOCTOR_JAVA or install a matching JDK.",
         )
     if java_seen:
         return DoctorRun("skipped", "Configured Java runtimes were not found.")
@@ -122,12 +140,17 @@ def run_vartapack_doctor(build_dir: Path, resolved: list[ResolvedMod]) -> Doctor
 
 def _java_candidates() -> list[Path]:
     candidates: list[Path] = []
+    for env_name in ("KERNOVA_DOCTOR_JAVA", "VARTAPACK_DOCTOR_JAVA", "VARTAPACK_JAVA"):
+        java_path = os.environ.get(env_name)
+        if java_path:
+            candidates.extend(_java_path_candidates(java_path))
     java_home = os.environ.get("JAVA_HOME")
     if java_home:
-        candidates.append(Path(java_home) / "bin" / "java")
+        candidates.extend(_java_path_candidates(java_home))
     for version in ("25", "24", "23", "22", "21"):
         candidates.append(Path(f"/usr/lib/jvm/java-{version}-openjdk-amd64/bin/java"))
         candidates.append(Path(f"/usr/lib/jvm/java-{version}-openjdk/bin/java"))
+        candidates.append(Path(f"/tmp/vartapack-jdk{version}/bin/java"))
     java_on_path = shutil.which("java")
     if java_on_path:
         candidates.append(Path(java_on_path))
@@ -142,6 +165,110 @@ def _java_candidates() -> list[Path]:
         seen.add(key)
         out.append(candidate)
     return out
+
+
+def _java_path_candidates(value: str) -> list[Path]:
+    path = Path(value)
+    if path.name == "java":
+        return [path]
+    return [path / "bin" / "java", path]
+
+
+def _doctor_classpath(jar_path: Path) -> str:
+    paths = [jar_path]
+    paths.extend(_doctor_dependency_jars())
+    return os.pathsep.join(str(path) for path in paths)
+
+
+def _doctor_dependency_jars() -> list[Path]:
+    out: list[Path] = []
+    out.extend(_classpath_env_paths("KERNOVA_DOCTOR_CLASSPATH"))
+    out.extend(_classpath_env_paths("VARTAPACK_DOCTOR_CLASSPATH"))
+
+    vendored = DOCTOR_VENDOR_DIR / DOCTOR_GSON_FILE
+    if vendored.exists():
+        out.append(vendored)
+    else:
+        cached = _doctor_gson_jar()
+        if cached:
+            out.append(cached)
+
+    for path in (Path("/tmp/gson.jar"),):
+        if path.exists():
+            out.append(path)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in out:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _classpath_env_paths(name: str) -> list[Path]:
+    value = os.environ.get(name, "")
+    if not value:
+        return []
+    return [Path(item) for item in value.split(os.pathsep) if item]
+
+
+def _doctor_gson_jar() -> Path | None:
+    cached = DOCTOR_CACHE_DIR / DOCTOR_GSON_FILE
+    if cached.exists():
+        return cached
+
+    try:
+        DOCTOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = cached.with_suffix(".tmp")
+        with urllib.request.urlopen(DOCTOR_GSON_URL, timeout=20) as response:
+            tmp.write_bytes(response.read())
+        tmp.replace(cached)
+        return cached
+    except (OSError, urllib.error.URLError):
+        return None
+
+
+def _doctor_required_java(jar_path: Path) -> int | None:
+    try:
+        with zipfile.ZipFile(jar_path) as jar:
+            raw = jar.read(DOCTOR_CLASS_FILE)
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+    return _java_major_from_class_file(raw)
+
+
+def _java_major_from_class_file(raw: bytes) -> int | None:
+    if len(raw) < 8 or raw[:4] != b"\xca\xfe\xba\xbe":
+        return None
+    class_major = int.from_bytes(raw[6:8], "big")
+    if class_major < 45:
+        return None
+    return class_major - 44
+
+
+def _java_runtime_failure(error: str) -> bool:
+    markers = (
+        "NoClassDefFoundError",
+        "ClassNotFoundException",
+        "Could not find or load main class",
+        "Unable to initialize main class",
+        "ExceptionInInitializerError",
+    )
+    return any(marker in error for marker in markers)
+
+
+def _doctor_runtime_failure_message(error: str, required_java: int | None) -> str:
+    hints: list[str] = []
+    if required_java:
+        hints.append(f"requires Java {required_java}+")
+    if "com/google/gson" in error:
+        hints.append("needs Gson on the Doctor classpath")
+    hint_text = f" ({'; '.join(hints)})" if hints else ""
+    first_line = error.splitlines()[0] if error else "Java runtime failed before Doctor could run."
+    return f"VartaPack Doctor could not start{hint_text}: {first_line}"
 
 
 def _collect_jar_inspections(mods_dir: Path, resolved: list[ResolvedMod]) -> dict[str, JarInspection]:

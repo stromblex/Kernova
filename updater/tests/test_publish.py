@@ -494,7 +494,7 @@ class PublishTests(TestCase):
                 )
 
         self.assertEqual(missing, [])
-        self.assertEqual(metadata["gameVersions"], [16021, 11135, 9638, 7499])
+        self.assertEqual(metadata["gameVersions"], [16021, 11135, 7499])
         self.assertEqual(metadata["releaseType"], "beta")
 
     def test_curseforge_release_type_auto_uses_pack_version_channel(self) -> None:
@@ -583,6 +583,7 @@ class PublishTests(TestCase):
             with (
                 patch.object(publish, "platform_dir", return_value=root),
                 patch.object(publish, "changelog_path", return_value=changelog),
+                patch.object(publish, "modrinth_version_exists", return_value=False),
                 patch.object(publish, "post_multipart", return_value=(200, "ok")) as post_multipart,
             ):
                 ok = publish.upload_modrinth(
@@ -620,6 +621,7 @@ class PublishTests(TestCase):
             with (
                 patch.object(publish, "platform_dir", return_value=root),
                 patch.object(publish, "changelog_path", return_value=changelog),
+                patch.object(publish, "modrinth_version_exists", return_value=False),
                 patch.object(publish, "post_multipart", return_value=(200, "ok")) as post_multipart,
             ):
                 ok = publish.upload_modrinth(
@@ -660,6 +662,7 @@ class PublishTests(TestCase):
                 patch.object(publish, "platform_dir", return_value=root),
                 patch.object(publish, "changelog_path", return_value=changelog),
                 patch.object(publish, "fetch_modrinth_project_metadata", return_value=None),
+                patch.object(publish, "modrinth_version_exists", return_value=False),
                 patch.object(publish, "patch_json", return_value=(204, "")) as patch_json,
                 patch.object(publish, "post_multipart", return_value=(200, "ok")),
             ):
@@ -707,6 +710,7 @@ class PublishTests(TestCase):
                     "fetch_modrinth_project_metadata",
                     return_value={"client_side": "required", "server_side": "unsupported"},
                 ),
+                patch.object(publish, "modrinth_version_exists", return_value=False),
                 patch.object(publish, "patch_json") as patch_json,
                 patch.object(publish, "post_multipart", return_value=(200, "ok")) as post_multipart,
             ):
@@ -720,6 +724,46 @@ class PublishTests(TestCase):
         self.assertTrue(ok)
         patch_json.assert_not_called()
         post_multipart.assert_called_once()
+
+    def test_modrinth_upload_skips_existing_version(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+        }
+        config = {
+            "modrinth": {
+                "project_id": "project",
+                "version_type": "auto",
+                "client_side": "required",
+                "server_side": "unsupported",
+                "loaders": {"fabric": ["fabric"]},
+                "featured": True,
+            }
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / f"{publish.artifact_slug(manifest)}.mrpack"
+            artifact.write_text("pack")
+            changelog = root / "changelog.md"
+            changelog.write_text("changes")
+            with (
+                patch.object(publish, "platform_dir", return_value=root),
+                patch.object(publish, "changelog_path", return_value=changelog),
+                patch.object(publish, "sync_modrinth_project_metadata", return_value=True),
+                patch.object(publish, "modrinth_version_exists", return_value=True),
+                patch.object(publish, "post_multipart") as post_multipart,
+            ):
+                ok = publish.upload_modrinth(
+                    manifest,
+                    config,
+                    {"modrinth_token": "token"},
+                    dry_run=False,
+                )
+
+        self.assertTrue(ok)
+        post_multipart.assert_not_called()
 
     def test_invalid_publish_release_type_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be one of"):
@@ -753,7 +797,46 @@ class PublishTests(TestCase):
             ):
                 notes = publish.read_manual_notes(manifest, None)
 
-        self.assertEqual(notes, "fresh notes\n\n### Build Details")
+        self.assertEqual(notes, "fresh notes")
+
+    def test_generated_changelog_summarizes_rebuild_against_previous_manifest(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.1-release",
+            "pack_version": "1.0.1-release",
+            "resolved_mods": [
+                {
+                    "name": "Sodium",
+                    "source": "list",
+                    "available": True,
+                    "version_number": "1.0.0",
+                    "version_id": "same",
+                }
+            ],
+        }
+        previous = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+            "resolved_mods": [
+                {
+                    "name": "Sodium",
+                    "source": "list",
+                    "available": True,
+                    "version_number": "1.0.0",
+                    "version_id": "same",
+                }
+            ],
+        }
+
+        with patch.object(publish, "find_previous_manifest", return_value=previous):
+            changelog = publish.generated_changelog(manifest)
+
+        self.assertIn("No mod version changes since `1.0.0-release`", changelog)
+        self.assertIn("### Build Details", changelog)
+        self.assertNotIn("### Included Mods", changelog)
 
     def test_neoforge_dependency_prefix_matches_exact_minecraft_patch(self) -> None:
         self.assertEqual(publish.neoforge_maven_prefix("1.21"), "21.0.")

@@ -6,6 +6,7 @@ publish/prism/
 publish/modrinth/
 publish/curseforge/
 publish/packping/
+publish/notes/
 publish/secrets.json
 
 # Python
@@ -13,6 +14,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.cache/
 dist/
 
 # uv

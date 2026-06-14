@@ -41,6 +41,13 @@ PUBLISH_CHANNELS = {"release", "beta", "alpha"}
 PACKPING_PLATFORMS = ("modrinth", "curseforge")
 PACKPING_CONFIG_REL = Path("config/packping.json")
 DEFAULT_PACKPING_REMOTE_BASE_URL = "https://stromblex.github.io/kernova-update"
+GENERATED_NOTE_SECTIONS = {
+    "build details",
+    "mods",
+    "included mods",
+    "auto dependencies",
+    "unavailable",
+}
 
 
 def load_json(path: Path, default: Any | None = None) -> Any:
@@ -222,6 +229,7 @@ def iter_curseforge_override_files(build_dir: Path, excluded_paths: set[Path] | 
 
 
 def generated_changelog(manifest: dict[str, Any]) -> str:
+    previous = find_previous_manifest(manifest)
     listed = [m for m in manifest["resolved_mods"] if m.get("source") == "list"]
     listed_available = [m for m in listed if m.get("available")]
     dependencies = [m for m in manifest["resolved_mods"] if m.get("source") == "dependency" and m.get("available")]
@@ -230,15 +238,21 @@ def generated_changelog(manifest: dict[str, Any]) -> str:
     lines = [
         f"## {build_display_name(manifest)}",
         "",
-        (
-            f"Minecraft {manifest['minecraft_version']} | {manifest['loader']} | "
-            f"{len(listed_available)}/{len(listed)} listed mods + "
-            f"{len(dependencies)} dependencies = {len(available_mods(manifest))} available"
-        ),
-        "",
-        "### Mods",
-        "",
     ]
+    if previous:
+        lines.extend(["### Changes", "", *changelog_change_lines(manifest, previous), ""])
+
+    lines.extend([
+        "### Build Details",
+        "",
+        build_summary_line(manifest),
+        "",
+    ])
+
+    if previous:
+        return "\n".join(lines).strip() + "\n"
+
+    lines.extend(["### Included Mods", ""])
     for mod in sorted(listed_available, key=lambda item: item["name"].lower()):
         lines.append(f"- {mod['name']} {mod.get('version_number') or ''}".rstrip())
 
@@ -253,6 +267,111 @@ def generated_changelog(manifest: dict[str, Any]) -> str:
             lines.append(f"- ~~{mod['name']}~~ - {mod.get('skipped_reason') or 'Unavailable'}")
 
     return "\n".join(lines).strip() + "\n"
+
+
+def build_summary_line(manifest: dict[str, Any]) -> str:
+    listed = [m for m in manifest["resolved_mods"] if m.get("source") == "list"]
+    listed_available = [m for m in listed if m.get("available")]
+    dependencies = [m for m in manifest["resolved_mods"] if m.get("source") == "dependency" and m.get("available")]
+    return (
+        f"Minecraft {manifest['minecraft_version']} | {manifest['loader']} | "
+        f"{len(listed_available)}/{len(listed)} listed mods + "
+        f"{len(dependencies)} dependencies = {len(available_mods(manifest))} available"
+    )
+
+
+def find_previous_manifest(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    current_version = str(manifest.get("pack_version", ""))
+    current_channel = pack_version_channel(current_version)
+    candidates: list[dict[str, Any]] = []
+    for manifest_path in BUILDS_DIR.glob("*/build_manifest.json"):
+        try:
+            candidate = load_json(manifest_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not same_build_lineage(manifest, candidate):
+            continue
+        candidate_version = str(candidate.get("pack_version", ""))
+        if candidate_version == current_version:
+            continue
+        if pack_version_channel(candidate_version) != current_channel:
+            continue
+        if version_sort_key(candidate_version) >= version_sort_key(current_version):
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: version_sort_key(str(item.get("pack_version", ""))))[-1]
+
+
+def same_build_lineage(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    return (
+        candidate.get("minecraft_version") == current.get("minecraft_version")
+        and candidate.get("loader") == current.get("loader")
+        and build_name_base(candidate) == build_name_base(current)
+    )
+
+
+def build_name_base(manifest: dict[str, Any]) -> str:
+    display = build_display_name(manifest)
+    suffix = f" {manifest.get('loader')} {manifest.get('minecraft_version')} v{manifest.get('pack_version')}"
+    if display.endswith(suffix):
+        return display[:-len(suffix)]
+    return display.rsplit(" v", 1)[0]
+
+
+def changelog_change_lines(manifest: dict[str, Any], previous: dict[str, Any]) -> list[str]:
+    current_mods = available_mod_index(manifest)
+    previous_mods = available_mod_index(previous)
+    added = [current_mods[key] for key in sorted(current_mods.keys() - previous_mods.keys())]
+    removed = [previous_mods[key] for key in sorted(previous_mods.keys() - current_mods.keys())]
+    updated = [
+        (previous_mods[key], current_mods[key])
+        for key in sorted(current_mods.keys() & previous_mods.keys())
+        if mod_version_signature(previous_mods[key]) != mod_version_signature(current_mods[key])
+    ]
+
+    previous_version = previous.get("pack_version", "")
+    if not added and not removed and not updated:
+        return [
+            f"- No mod version changes since `{previous_version}`; this rebuild contains config, metadata, or feed changes only."
+        ]
+
+    lines: list[str] = []
+    for old, new in updated:
+        lines.append(f"- Updated {new.get('name')}: {mod_version_label(old)} -> {mod_version_label(new)}")
+    for mod in added:
+        lines.append(f"- Added {mod.get('name')} {mod_version_label(mod)}".rstrip())
+    for mod in removed:
+        lines.append(f"- Removed {mod.get('name')} {mod_version_label(mod)}".rstrip())
+    return lines
+
+
+def available_mod_index(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for mod in available_mods(manifest):
+        out[mod_identity(mod)] = mod
+    return out
+
+
+def mod_identity(mod: dict[str, Any]) -> str:
+    for key in ("modrinth_id", "slug", "name", "filename"):
+        value = str(mod.get(key) or "").strip().lower()
+        if value:
+            return value
+    return "unknown"
+
+
+def mod_version_signature(mod: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(mod.get("version_id") or ""),
+        str(mod.get("version_number") or ""),
+        str(mod.get("filename") or ""),
+    )
+
+
+def mod_version_label(mod: dict[str, Any]) -> str:
+    return str(mod.get("version_number") or mod.get("filename") or "unknown")
 
 
 def compose_changelog(manifest: dict[str, Any], notes_file: str | None = None) -> str:
@@ -285,13 +404,13 @@ def read_manual_notes(manifest: dict[str, Any], notes_file: str | None) -> str:
 
     for path in candidates:
         if path.exists():
-            return strip_heading(path.read_text()).strip()
+            return sanitize_manual_notes(path.read_text())
 
     build_changelog = CHANGELOGS_DIR / f"{build_display_name(manifest)}.md"
     if build_changelog.exists():
         extracted = extract_release_notes(build_changelog.read_text())
         if extracted:
-            return extracted
+            return sanitize_manual_notes(extracted)
     return ""
 
 
@@ -302,6 +421,16 @@ def extract_release_notes(markdown: str) -> str:
         if title in sections:
             return sections[title].strip()
     return ""
+
+
+def sanitize_manual_notes(markdown: str) -> str:
+    lines: list[str] = []
+    for line in strip_heading(markdown).splitlines():
+        match = re.match(r"^#{2,6}\s+(.+?)\s*$", line)
+        if match and match.group(1).strip().lower() in GENERATED_NOTE_SECTIONS:
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def split_markdown_sections(markdown: str) -> dict[str, str]:
@@ -631,7 +760,6 @@ def curseforge_upload_metadata(
         ([minecraft_id] if minecraft_id else [])
         + list(cf.get("game_versions", []))
         + list(cf.get("java_versions", []))
-        + list(cf.get("environment", []))
         + list(cf.get("loaders", {}).get(manifest["loader"], []))
     )
     metadata = {
@@ -1518,6 +1646,9 @@ def upload_modrinth(
         return False
     if not sync_modrinth_project_metadata(config, token, dry_run=False):
         return False
+    if modrinth_version_exists(project_id, data["version_number"]):
+        print(f"[OK] Modrinth version already exists: {data['version_number']}")
+        return True
 
     status, body = post_multipart(
         "https://api.modrinth.com/v2/version",
@@ -1587,6 +1718,22 @@ def fetch_modrinth_project_metadata(project_id: str) -> dict[str, Any] | None:
 
 def modrinth_project_metadata_matches(current: dict[str, Any], desired: dict[str, str]) -> bool:
     return all(str(current.get(key) or "").strip().lower() == value for key, value in desired.items())
+
+
+def modrinth_version_exists(project_id: str, version_number: str) -> bool:
+    versions = fetch_modrinth_project_versions(project_id)
+    return any(str(version.get("version_number") or "") == version_number for version in versions)
+
+
+def fetch_modrinth_project_versions(project_id: str) -> list[dict[str, Any]]:
+    url = f"https://api.modrinth.com/v2/project/{urllib.parse.quote(project_id, safe='')}/version"
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
 
 
 def upload_curseforge(

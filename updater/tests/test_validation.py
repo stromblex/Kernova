@@ -165,6 +165,25 @@ class ValidationTests(TestCase):
 
         self.assertEqual([issue for issue in issues if issue.level == "error"], [])
 
+    def test_publish_config_rejects_curseforge_environment_ids(self) -> None:
+        with TemporaryDirectory() as tmp:
+            publish_dir = Path(tmp) / "publish"
+            publish_dir.mkdir()
+            (publish_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "curseforge": {
+                            "environment": [9638],
+                        }
+                    }
+                )
+            )
+
+            with patch.object(validation, "PUBLISH_DIR", publish_dir):
+                issues = validation.validate_publish_config()
+
+        self.assertTrue(any(issue.level == "error" and "environment" in issue.message for issue in issues))
+
     def test_modrinth_artifact_validation_requires_loader_dependency(self) -> None:
         with TemporaryDirectory() as tmp:
             modrinth_dir = Path(tmp) / "modrinth"

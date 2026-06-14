@@ -4,6 +4,7 @@ from unittest import TestCase
 from unittest.mock import patch
 import json
 import subprocess
+import zipfile
 
 from kernova_update import builder
 from kernova_update import integrations
@@ -92,6 +93,7 @@ class BuilderTests(TestCase):
 
             with (
                 patch.object(integrations, "_java_candidates", return_value=[Path("/old/java"), Path("/newer/java")]),
+                patch.object(integrations, "_doctor_dependency_jars", return_value=[]),
                 patch.object(integrations.subprocess, "run", side_effect=[old_java, newer_java]) as run,
             ):
                 doctor = integrations.run_vartapack_doctor(build_dir, resolved)
@@ -99,3 +101,40 @@ class BuilderTests(TestCase):
         self.assertEqual(doctor.status, "ok")
         self.assertEqual(run.call_args_list[0].args[0][0], "/old/java")
         self.assertEqual(run.call_args_list[1].args[0][0], "/newer/java")
+
+    def test_vartapack_doctor_classpath_failure_is_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            mods_dir = build_dir / "mods"
+            mods_dir.mkdir()
+            jar_path = mods_dir / "vartapack.jar"
+            jar_path.write_text("")
+            resolved = [ResolvedMod(name="VartaPack", slug="vartapack", filename="vartapack.jar", available=True)]
+            failure = subprocess.CompletedProcess(
+                args=["/java"],
+                returncode=1,
+                stdout="",
+                stderr="Error: Unable to initialize main class com.stromblex.vartapack.doctor.DoctorCli\n"
+                "Caused by: java.lang.NoClassDefFoundError: com/google/gson/JsonElement",
+            )
+
+            with (
+                patch.object(integrations, "_java_candidates", return_value=[Path("/java")]),
+                patch.object(integrations, "_doctor_dependency_jars", return_value=[]),
+                patch.object(integrations.subprocess, "run", return_value=failure),
+            ):
+                doctor = integrations.run_vartapack_doctor(build_dir, resolved)
+
+        self.assertEqual(doctor.status, "error")
+        self.assertIn("Gson", doctor.message)
+
+    def test_doctor_required_java_reads_class_major(self) -> None:
+        with TemporaryDirectory() as tmp:
+            jar_path = Path(tmp) / "vartapack.jar"
+            class_file = b"\xca\xfe\xba\xbe" + (0).to_bytes(2, "big") + (69).to_bytes(2, "big")
+            with zipfile.ZipFile(jar_path, "w") as archive:
+                archive.writestr(integrations.DOCTOR_CLASS_FILE, class_file)
+
+            required = integrations._doctor_required_java(jar_path)
+
+        self.assertEqual(required, 25)

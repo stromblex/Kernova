@@ -159,6 +159,15 @@ def validate_publish_config() -> list[ValidationIssue]:
     if remote_repo and Path(remote_repo).is_absolute():
         issues.append(_warning(config_path, "packping.remote_repo uses an absolute local path."))
 
+    curseforge = config.get("curseforge", {})
+    if isinstance(curseforge, dict) and curseforge.get("environment"):
+        issues.append(
+            _error(
+                config_path,
+                "curseforge.environment must stay empty; the CurseForge upload endpoint rejects Client/Server environment IDs as invalid dependencies.",
+            )
+        )
+
     return issues
 
 

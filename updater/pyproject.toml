@@ -19,3 +19,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kernova_update"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/kernova_update/vendor/gson-2.11.0.jar" = "kernova_update/vendor/gson-2.11.0.jar"
+"src/kernova_update/vendor/README.md" = "kernova_update/vendor/README.md"
