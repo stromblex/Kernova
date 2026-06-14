@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 PUBLISH_DIR = PROJECT_ROOT / "publish"
 BUILDS_DIR = PROJECT_ROOT / "builds"
 MODRINTH_DIR = PUBLISH_DIR / "modrinth"
+CURSEFORGE_DIR = PUBLISH_DIR / "curseforge"
 PACKPING_UPDATE = PUBLISH_DIR / "packping" / "update.json"
 LOADERS = ("fabric", "neoforge")
 GENERATED_CONFIG_FILES = {
@@ -66,6 +67,7 @@ def validate_artifacts() -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     issues.extend(validate_build_artifacts())
     issues.extend(validate_modrinth_artifacts())
+    issues.extend(validate_curseforge_artifacts())
     issues.extend(validate_packping_update())
     return issues
 
@@ -249,6 +251,38 @@ def validate_modrinth_artifacts() -> list[ValidationIssue]:
             file_size = item.get("fileSize", 0)
             if not path or not downloads or not hashes.get("sha1") or not file_size:
                 issues.append(_error(artifact, f"Incomplete Modrinth file entry: {path or '<missing path>'}."))
+    return issues
+
+
+def validate_curseforge_artifacts() -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    artifacts = sorted(CURSEFORGE_DIR.glob("**/*-curseforge.zip"))
+    if not artifacts:
+        return [_warning(CURSEFORGE_DIR, "No CurseForge modpack zip artifacts found.")]
+
+    for artifact in artifacts:
+        try:
+            with zipfile.ZipFile(artifact) as archive:
+                names = set(archive.namelist())
+                manifest = json.loads(archive.read("manifest.json"))
+        except (OSError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as error:
+            issues.append(_error(artifact, f"Invalid CurseForge modpack zip: {error}"))
+            continue
+
+        if manifest.get("manifestType") != "minecraftModpack":
+            issues.append(_error(artifact, "CurseForge manifestType must be minecraftModpack."))
+        if manifest.get("manifestVersion") != 1:
+            issues.append(_error(artifact, "CurseForge manifestVersion must be 1."))
+        minecraft = manifest.get("minecraft", {})
+        if not isinstance(minecraft, dict) or not minecraft.get("version"):
+            issues.append(_error(artifact, "CurseForge manifest is missing minecraft.version."))
+        modloaders = minecraft.get("modLoaders") if isinstance(minecraft, dict) else None
+        if not isinstance(modloaders, list) or not modloaders:
+            issues.append(_error(artifact, "CurseForge manifest is missing minecraft.modLoaders."))
+        if "overrides" not in manifest:
+            issues.append(_error(artifact, "CurseForge manifest is missing overrides field."))
+        elif not any(name.startswith(f"{manifest['overrides'].rstrip('/')}/") for name in names):
+            issues.append(_error(artifact, f"CurseForge overrides folder '{manifest['overrides']}' is missing."))
     return issues
 
 

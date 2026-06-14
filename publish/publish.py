@@ -29,6 +29,7 @@ CONFIG_PATH = SCRIPT_DIR / "config.json"
 SECRETS_PATH = SCRIPT_DIR / "secrets.json"
 
 MODRINTH_DIR = SCRIPT_DIR / "modrinth"
+CURSEFORGE_DIR = SCRIPT_DIR / "curseforge"
 FULL_DIR = SCRIPT_DIR / "full"
 PRISM_DIR = SCRIPT_DIR / "prism"
 PACKPING_DIR = SCRIPT_DIR / "packping"
@@ -157,6 +158,17 @@ def iter_override_files(build_dir: Path) -> list[Path]:
         if rel.parts[0] == "mods":
             continue
         if rel.name == "build_manifest.json":
+            continue
+        out.append(path)
+    return sorted(out)
+
+
+def iter_curseforge_override_files(build_dir: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in build_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name == "build_manifest.json":
             continue
         out.append(path)
     return sorted(out)
@@ -420,8 +432,8 @@ def dedupe_ints(values: list[Any]) -> list[int]:
 
 
 def curseforge_upload_artifact(manifest: dict[str, Any], config: dict[str, Any]) -> Path:
-    out_dir = platform_dir(FULL_DIR, manifest)
-    return out_dir / f"{artifact_slug(manifest)}-full.zip"
+    out_dir = platform_dir(CURSEFORGE_DIR, manifest)
+    return out_dir / f"{artifact_slug(manifest)}-curseforge.zip"
 
 
 def curseforge_upload_metadata(
@@ -553,6 +565,53 @@ def create_full_zip(build_dir: Path, manifest: dict[str, Any], out_dir: Path) ->
             if path.is_file() and path.name != "build_manifest.json":
                 zf.write(path, path.relative_to(build_dir).as_posix())
     return artifact
+
+
+def create_curseforge_modpack_zip(
+    build_dir: Path,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    out_dir: Path,
+) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifact = out_dir / f"{artifact_slug(manifest)}-curseforge.zip"
+    loader_dependencies = resolve_loader_dependencies(manifest, config)
+    cf_manifest = {
+        "minecraft": {
+            "version": manifest["minecraft_version"],
+            "modLoaders": [
+                {
+                    "id": curseforge_modloader_id(manifest, loader_dependencies),
+                    "primary": True,
+                }
+            ],
+        },
+        "manifestType": "minecraftModpack",
+        "manifestVersion": 1,
+        "name": build_display_name(manifest),
+        "version": manifest["pack_version"],
+        "author": config.get("author", ""),
+        "files": [],
+        "overrides": "overrides",
+    }
+
+    with zipfile.ZipFile(artifact, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(cf_manifest, indent=2) + "\n")
+        write_icon(zf, config, "overrides/icon.png")
+        for path in iter_curseforge_override_files(build_dir):
+            rel = path.relative_to(build_dir)
+            zf.write(path, f"overrides/{rel.as_posix()}")
+
+    return artifact
+
+
+def curseforge_modloader_id(manifest: dict[str, Any], loader_dependencies: dict[str, str]) -> str:
+    loader = manifest["loader"]
+    if loader == "fabric":
+        return f"fabric-{loader_dependencies.get('fabric-loader', '')}".rstrip("-")
+    if loader == "neoforge":
+        return f"neoforge-{loader_dependencies.get('neoforge', '')}".rstrip("-")
+    return loader
 
 
 def create_prism_zip(
@@ -869,17 +928,14 @@ def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_di
     changelog_file.write_text(changelog)
 
     mrpack = create_mrpack(build_dir, manifest, config, modrinth_dir)
-    full_zip = create_full_zip(build_dir, manifest, full_dir) if config["curseforge"].get("allow_full_overrides_zip", True) else None
+    curseforge_zip = create_curseforge_modpack_zip(build_dir, manifest, config, platform_dir(CURSEFORGE_DIR, manifest))
+    full_zip = create_full_zip(build_dir, manifest, full_dir)
     prism_zip = create_prism_zip(build_dir, manifest, config, prism_dir)
     packping_entry = create_packping_entry(manifest, config, packping_dir, mrpack.name, changelog)
 
     print(f"[OK] Modrinth pack: {mrpack}")
-    if full_zip:
-        print(f"[OK] CurseForge upload artifact: {full_zip}")
-    else:
-        print("[WARN] CurseForge full-zip upload mode is enabled, but full zip creation is disabled.")
-    if full_zip:
-        print(f"[OK] Full test zip: {full_zip}")
+    print(f"[OK] CurseForge modpack zip: {curseforge_zip}")
+    print(f"[OK] Full test zip: {full_zip}")
     print(f"[OK] Prism import zip: {prism_zip}")
     print(f"[OK] Changelog: {changelog_file}")
     print(f"[OK] PackPing entry: {packping_entry}")
@@ -926,11 +982,26 @@ def release_build(args: argparse.Namespace) -> int:
         print("[ERROR] Release stopped: upload dry-run failed.")
         return 1
 
-    real_upload_args = copy.copy(args)
-    real_upload_args.dry_run = False
-    if upload_build(real_upload_args) != 0:
-        print("[ERROR] Release stopped: real upload failed.")
-        return 1
+    if args.platform == "both":
+        real_modrinth_args = copy.copy(args)
+        real_modrinth_args.dry_run = False
+        real_modrinth_args.platform = "modrinth"
+        if upload_build(real_modrinth_args) != 0:
+            print("[ERROR] Release stopped: real Modrinth upload failed.")
+            return 1
+
+        real_curseforge_args = copy.copy(args)
+        real_curseforge_args.dry_run = False
+        real_curseforge_args.platform = "curseforge"
+        if upload_build(real_curseforge_args) != 0:
+            print("[ERROR] Release stopped: real CurseForge upload failed.")
+            return 1
+    else:
+        real_upload_args = copy.copy(args)
+        real_upload_args.dry_run = False
+        if upload_build(real_upload_args) != 0:
+            print("[ERROR] Release stopped: real upload failed.")
+            return 1
 
     sync_args = argparse.Namespace(
         commit=True,
@@ -1215,7 +1286,7 @@ def main() -> int:
         p.add_argument("--mc", help="Filter latest by Minecraft version")
         p.add_argument("--notes-file", help="Manual release notes to merge into platform changelogs")
 
-    package_parser = sub.add_parser("package", help="Create mrpack, full zip, changelogs, PackPing entry")
+    package_parser = sub.add_parser("package", help="Create mrpack, CurseForge zip, full zip, changelogs, PackPing entry")
     add_build_args(package_parser)
     package_parser.add_argument("--sync-update", action="store_true", help="Copy update.json to remote PackPing feed repo")
     package_parser.add_argument("--commit", action="store_true", help="Commit remote update JSON when used with --sync-update")

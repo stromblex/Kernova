@@ -65,7 +65,6 @@
     "loaders": {
       "fabric": [7499],
       "neoforge": [10150]
-    },
-    "allow_full_overrides_zip": true
+    }
   }
 }

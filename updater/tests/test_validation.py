@@ -183,3 +183,16 @@ class ValidationTests(TestCase):
                 issues = validation.validate_modrinth_artifacts()
 
         self.assertTrue(any("expected 26.1.0.*" in issue.message for issue in issues))
+
+    def test_curseforge_artifact_validation_requires_manifest(self) -> None:
+        with TemporaryDirectory() as tmp:
+            curseforge_dir = Path(tmp) / "curseforge"
+            artifact = curseforge_dir / "26.1" / "fabric" / "test" / "test-curseforge.zip"
+            artifact.parent.mkdir(parents=True)
+            with zipfile.ZipFile(artifact, "w") as archive:
+                archive.writestr("overrides/config/test.json", "{}")
+
+            with patch.object(validation, "CURSEFORGE_DIR", curseforge_dir):
+                issues = validation.validate_curseforge_artifacts()
+
+        self.assertTrue(any("manifest.json" in issue.message for issue in issues))

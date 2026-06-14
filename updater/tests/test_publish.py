@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import zipfile
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from argparse import Namespace
@@ -21,7 +22,7 @@ publish = load_publish_module()
 
 
 class PublishTests(TestCase):
-    def test_curseforge_upload_artifact_defaults_to_full_zip(self) -> None:
+    def test_curseforge_upload_artifact_defaults_to_modpack_zip(self) -> None:
         manifest = {
             "minecraft_version": "26.1",
             "loader": "fabric",
@@ -32,10 +33,47 @@ class PublishTests(TestCase):
 
         path = publish.curseforge_upload_artifact(manifest, config)
 
-        self.assertEqual(path.name, "Kernova-fabric-26.1-v1.0.0-release-full.zip")
-        self.assertIn("full", path.parts)
+        self.assertEqual(path.name, "Kernova-fabric-26.1-v1.0.0-release-curseforge.zip")
+        self.assertIn("curseforge", path.parts)
 
-    def test_curseforge_dry_run_upload_uses_full_zip_mode(self) -> None:
+    def test_create_curseforge_zip_has_manifest_and_overrides(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+        }
+        config = {
+            "author": "stromblex",
+            "icon": "",
+            "modrinth": {
+                "loader_dependencies": {"fabric": {"fabric-loader": "0.19.3"}},
+            },
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build"
+            out_dir = root / "out"
+            (build_dir / "config").mkdir(parents=True)
+            (build_dir / "config" / "packping.json").write_text("{}")
+            (build_dir / "mods").mkdir()
+            (build_dir / "mods" / "example.jar").write_text("jar")
+            (build_dir / "build_manifest.json").write_text("{}")
+
+            artifact = publish.create_curseforge_modpack_zip(build_dir, manifest, config, out_dir)
+
+            with zipfile.ZipFile(artifact) as archive:
+                names = set(archive.namelist())
+                cf_manifest = json.loads(archive.read("manifest.json"))
+
+        self.assertIn("manifest.json", names)
+        self.assertIn("overrides/config/packping.json", names)
+        self.assertIn("overrides/mods/example.jar", names)
+        self.assertNotIn("overrides/build_manifest.json", names)
+        self.assertEqual(cf_manifest["manifestType"], "minecraftModpack")
+        self.assertEqual(cf_manifest["minecraft"]["modLoaders"][0]["id"], "fabric-0.19.3")
+
+    def test_curseforge_dry_run_upload_uses_modpack_zip_mode(self) -> None:
         manifest = {
             "minecraft_version": "26.1",
             "loader": "fabric",
@@ -55,7 +93,7 @@ class PublishTests(TestCase):
             },
         }
         with TemporaryDirectory() as tmp:
-            artifact = Path(tmp) / "full.zip"
+            artifact = Path(tmp) / "curseforge.zip"
             artifact.write_text("zip")
             changelog = Path(tmp) / "changelog.md"
             changelog.write_text("changes")
@@ -226,4 +264,31 @@ class PublishTests(TestCase):
 
         self.assertEqual(code, 1)
         upload_build.assert_called_once()
+        sync_update_json.assert_not_called()
+
+    def test_release_stops_before_curseforge_when_real_modrinth_fails(self) -> None:
+        args = Namespace(
+            build=None,
+            latest=True,
+            loader="both",
+            mc="26.1",
+            notes_file=None,
+            platform="both",
+            remote_repo=None,
+            remote_file=None,
+            message=None,
+            init_repo=False,
+        )
+        with (
+            patch.object(publish, "build_dirs_from_args", return_value=[Path("build")]),
+            patch.object(publish, "package_one_build"),
+            patch.object(publish, "upload_build", side_effect=[0, 1]) as upload_build,
+            patch.object(publish, "sync_update_json") as sync_update_json,
+        ):
+            code = publish.release_build(args)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(upload_build.call_count, 2)
+        self.assertTrue(upload_build.call_args_list[0].args[0].dry_run)
+        self.assertEqual(upload_build.call_args_list[1].args[0].platform, "modrinth")
         sync_update_json.assert_not_called()
