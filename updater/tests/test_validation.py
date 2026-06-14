@@ -118,7 +118,7 @@ class ValidationTests(TestCase):
 
         self.assertTrue(any("Duplicate PackPing entry" in issue.message for issue in issues))
 
-    def test_packping_validation_rejects_empty_feed(self) -> None:
+    def test_packping_validation_accepts_empty_feed(self) -> None:
         with TemporaryDirectory() as tmp:
             update_json = Path(tmp) / "update.json"
             update_json.write_text("[]")
@@ -126,7 +126,44 @@ class ValidationTests(TestCase):
             with patch.object(validation, "PACKPING_UPDATE", update_json):
                 issues = validation.validate_packping_update()
 
-        self.assertTrue(any("at least one entry" in issue.message for issue in issues))
+        self.assertEqual([issue for issue in issues if issue.level == "error"], [])
+
+    def test_packping_validation_accepts_blank_feed_as_empty(self) -> None:
+        with TemporaryDirectory() as tmp:
+            update_json = Path(tmp) / "update.json"
+            update_json.write_text("")
+
+            with patch.object(validation, "PACKPING_UPDATE", update_json):
+                issues = validation.validate_packping_update()
+
+        self.assertEqual([issue for issue in issues if issue.level == "error"], [])
+
+    def test_packping_validation_accepts_split_feed_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_update = root / "update.json"
+            for name, download in (
+                ("update.modrinth.json", "https://example.invalid/modrinth"),
+                ("update.curseforge.json", "https://example.invalid/curseforge"),
+            ):
+                (root / name).write_text(
+                    json.dumps(
+                        [
+                            {
+                                "minecraft": "26.1",
+                                "loader": "fabric",
+                                "version": "1.0.0-release",
+                                "download": download,
+                                "changelog": "short",
+                            }
+                        ]
+                    )
+                )
+
+            with patch.object(validation, "PACKPING_UPDATE", legacy_update):
+                issues = validation.validate_packping_update()
+
+        self.assertEqual([issue for issue in issues if issue.level == "error"], [])
 
     def test_modrinth_artifact_validation_requires_loader_dependency(self) -> None:
         with TemporaryDirectory() as tmp:

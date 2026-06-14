@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .models import ResolvedMod
 
-DEFAULT_PACKPING_UPDATE_URL = "https://stromblex.github.io/kernova-update/update.json"
+DEFAULT_PACKPING_UPDATE_URL = "https://stromblex.github.io/kernova-update/update.modrinth.json"
 
 
 @dataclass(frozen=True)

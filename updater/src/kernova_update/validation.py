@@ -19,6 +19,7 @@ BUILDS_DIR = PROJECT_ROOT / "builds"
 MODRINTH_DIR = PUBLISH_DIR / "modrinth"
 CURSEFORGE_DIR = PUBLISH_DIR / "curseforge"
 PACKPING_UPDATE = PUBLISH_DIR / "packping" / "update.json"
+PACKPING_PLATFORM_UPDATES = ("update.modrinth.json", "update.curseforge.json")
 LOADERS = ("fabric", "neoforge")
 GENERATED_CONFIG_FILES = {
     "packping.json",
@@ -311,18 +312,36 @@ def validate_curseforge_artifacts() -> list[ValidationIssue]:
 
 
 def validate_packping_update() -> list[ValidationIssue]:
-    if not PACKPING_UPDATE.exists():
-        return [_warning(PACKPING_UPDATE, "PackPing update JSON does not exist.")]
+    paths = packping_update_paths()
+    if not paths:
+        return [_warning(PACKPING_UPDATE.parent, "PackPing update JSON does not exist.")]
+
+    issues: list[ValidationIssue] = []
+    for path in paths:
+        issues.extend(validate_packping_update_file(path))
+    return issues
+
+
+def packping_update_paths() -> list[Path]:
+    split_paths = [PACKPING_UPDATE.parent / name for name in PACKPING_PLATFORM_UPDATES]
+    existing_split = [path for path in split_paths if path.exists()]
+    if existing_split:
+        return existing_split
+    return [PACKPING_UPDATE] if PACKPING_UPDATE.exists() else []
+
+
+def validate_packping_update_file(path: Path) -> list[ValidationIssue]:
+    if not path.exists():
+        return [_warning(path, "PackPing update JSON does not exist.")]
 
     try:
-        entries = json.loads(PACKPING_UPDATE.read_text())
+        text = path.read_text()
+        entries = [] if not text.strip() else json.loads(text)
     except json.JSONDecodeError as error:
-        return [_error(PACKPING_UPDATE, f"Cannot parse PackPing update JSON: {error}")]
+        return [_error(path, f"Cannot parse PackPing update JSON: {error}")]
 
     if not isinstance(entries, list):
-        return [_error(PACKPING_UPDATE, "PackPing update JSON must be a list.")]
-    if not entries:
-        return [_error(PACKPING_UPDATE, "PackPing update JSON must contain at least one entry.")]
+        return [_error(path, "PackPing update JSON must be a list.")]
 
     issues: list[ValidationIssue] = []
     seen: set[tuple[str, str]] = set()
@@ -331,14 +350,14 @@ def validate_packping_update() -> list[ValidationIssue]:
         loader = str(entry.get("loader", ""))
         key = (minecraft, loader)
         if key in seen:
-            issues.append(_error(PACKPING_UPDATE, f"Duplicate PackPing entry for Minecraft {minecraft} / {loader}."))
+            issues.append(_error(path, f"Duplicate PackPing entry for Minecraft {minecraft} / {loader}."))
         seen.add(key)
 
         for field in ("minecraft", "loader", "version", "download", "changelog"):
             if not entry.get(field):
-                issues.append(_error(PACKPING_UPDATE, f"PackPing entry {key} is missing {field}."))
+                issues.append(_error(path, f"PackPing entry {key} is missing {field}."))
         if loader not in LOADERS:
-            issues.append(_warning(PACKPING_UPDATE, f"PackPing entry uses unknown loader {loader!r}."))
+            issues.append(_warning(path, f"PackPing entry uses unknown loader {loader!r}."))
     return issues
 
 

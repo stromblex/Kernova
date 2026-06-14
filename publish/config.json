@@ -2,14 +2,25 @@
   "author": "stromblex",
   "icon": "publish/assets/KernovaLogo512.png",
   "packping": {
-    "update_json": "publish/packping/update.json",
     "remote_repo": "../kernova-update",
     "remote_url": "https://github.com/stromblex/kernova-update.git",
     "remote_branch": "main",
-    "remote_file": "update.json",
+    "remote_base_url": "https://stromblex.github.io/kernova-update",
     "commit_message": "chore: update Kernova PackPing feed",
-    "download_base_url": "",
-    "download_url_template": "https://modrinth.com/project/kernova/versions",
+    "platforms": {
+      "modrinth": {
+        "update_json": "publish/packping/update.modrinth.json",
+        "remote_file": "update.modrinth.json",
+        "update_url": "https://stromblex.github.io/kernova-update/update.modrinth.json",
+        "download_url_template": "https://modrinth.com/modpack/kernova/version/{version_number_url}"
+      },
+      "curseforge": {
+        "update_json": "publish/packping/update.curseforge.json",
+        "remote_file": "update.curseforge.json",
+        "update_url": "https://stromblex.github.io/kernova-update/update.curseforge.json",
+        "download_url_template": "https://www.curseforge.com/minecraft/modpacks/kernova/files/all?page=1&pageSize=20&version={minecraft}"
+      }
+    },
     "toast_on_minecraft_upgrade": true,
     "minecraft_upgrade_toast": {
       "title": "§eKernova is available for Minecraft %version%",
@@ -61,7 +72,7 @@
       "26.1": 83806
     },
     "java_versions": [],
-    "environment": [],
+    "environment": [9638],
     "loaders": {
       "fabric": [7499],
       "neoforge": [10150]

@@ -113,6 +113,78 @@ class PublishTests(TestCase):
             ],
         )
 
+    def test_mrpack_overrides_packping_update_url_for_modrinth_feed(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+            "resolved_mods": [],
+        }
+        config = {
+            "icon": "",
+            "modrinth": {"loader_dependencies": {"fabric": {"fabric-loader": "0.19.3"}}},
+            "packping": {
+                "platforms": {
+                    "modrinth": {
+                        "update_url": "https://example.invalid/update.modrinth.json",
+                    }
+                }
+            },
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build"
+            out_dir = root / "out"
+            (build_dir / "config").mkdir(parents=True)
+            (build_dir / "config" / "packping.json").write_text(
+                json.dumps({"updateUrl": "https://example.invalid/update.json", "localVersion": "old"})
+            )
+
+            artifact = publish.create_mrpack(build_dir, manifest, config, out_dir)
+
+            with zipfile.ZipFile(artifact) as archive:
+                packping_config = json.loads(archive.read("overrides/config/packping.json"))
+
+        self.assertEqual(packping_config["updateUrl"], "https://example.invalid/update.modrinth.json")
+
+    def test_curseforge_zip_overrides_packping_update_url_for_curseforge_feed(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+            "resolved_mods": [],
+        }
+        config = {
+            "author": "stromblex",
+            "icon": "",
+            "curseforge": {},
+            "modrinth": {"loader_dependencies": {"fabric": {"fabric-loader": "0.19.3"}}},
+            "packping": {
+                "platforms": {
+                    "curseforge": {
+                        "update_url": "https://example.invalid/update.curseforge.json",
+                    }
+                }
+            },
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build"
+            out_dir = root / "out"
+            (build_dir / "config").mkdir(parents=True)
+            (build_dir / "config" / "packping.json").write_text(
+                json.dumps({"updateUrl": "https://example.invalid/update.json", "localVersion": "old"})
+            )
+
+            artifact = publish.create_curseforge_modpack_zip(build_dir, manifest, config, out_dir)
+
+            with zipfile.ZipFile(artifact) as archive:
+                packping_config = json.loads(archive.read("overrides/config/packping.json"))
+
+        self.assertEqual(packping_config["updateUrl"], "https://example.invalid/update.curseforge.json")
+
     def test_create_curseforge_zip_fails_when_mod_jar_cannot_be_matched(self) -> None:
         manifest = {
             "minecraft_version": "26.1",
@@ -276,6 +348,86 @@ class PublishTests(TestCase):
             self.assertEqual(old_entry["toast"]["title"], "Kernova is available for Minecraft 26.1.1")
             self.assertEqual(old_entry["toast"]["subtitle"], "0.1.1-beta on fabric")
 
+    def test_packping_changelog_is_concise(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1.1",
+            "loader": "neoforge",
+            "build_folder": "Kernova neoforge 26.1.1 v0.1.0-beta",
+            "pack_version": "0.1.0-beta",
+            "resolved_mods": [
+                {"name": "Sodium", "source": "list", "available": True},
+                {"name": "Balm", "source": "dependency", "available": True},
+                {
+                    "name": "ModernFix",
+                    "source": "list",
+                    "available": False,
+                    "skipped_reason": "No version available",
+                },
+            ],
+        }
+
+        changelog = publish.packping_changelog(manifest, publish.generated_changelog(manifest))
+
+        self.assertIn("Pack version: 0.1.0-beta (beta)", changelog)
+        self.assertIn("Mods: 2 available", changelog)
+        self.assertIn("Unavailable: ModernFix", changelog)
+        self.assertNotIn("### Mods", changelog)
+        self.assertLessEqual(len(changelog.splitlines()), 10)
+
+    def test_update_packping_json_uses_platform_specific_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "packping": {
+                    "platforms": {
+                        "modrinth": {"update_json": str(root / "update.modrinth.json")},
+                        "curseforge": {"update_json": str(root / "update.curseforge.json")},
+                    }
+                }
+            }
+            entry = {
+                "minecraft": "26.1",
+                "loader": "fabric",
+                "version": "1.0.0-release",
+                "download": "https://example.invalid/modrinth",
+                "changelog": "short",
+            }
+
+            path = publish.update_packping_json(entry, config, "curseforge")
+
+            self.assertEqual(path, root / "update.curseforge.json")
+            self.assertFalse((root / "update.modrinth.json").exists())
+            self.assertEqual(json.loads(path.read_text())[0]["download"], "https://example.invalid/modrinth")
+
+    def test_packping_download_url_uses_platform_template(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+        }
+        config = {
+            "packping": {
+                "platforms": {
+                    "modrinth": {
+                        "download_url_template": "https://modrinth.example/{version_number_url}",
+                    },
+                    "curseforge": {
+                        "download_url_template": "https://curseforge.example/{minecraft}/{loader}",
+                    },
+                }
+            }
+        }
+
+        self.assertEqual(
+            publish.packping_download_url(manifest, config, "modrinth", "artifact.mrpack"),
+            "https://modrinth.example/1.0.0-release%2Bfabric",
+        )
+        self.assertEqual(
+            publish.packping_download_url(manifest, config, "curseforge", "artifact.zip"),
+            "https://curseforge.example/26.1/fabric",
+        )
+
     def test_minecraft_upgrade_toast_renders_placeholders(self) -> None:
         toast = publish.minecraft_upgrade_toast(
             {"version": "1.0.0-release", "loader": "neoforge"},
@@ -376,6 +528,37 @@ class PublishTests(TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(metadata["releaseType"], "beta")
 
+    def test_curseforge_release_type_auto_supports_alpha(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v0.0.1-alpha",
+            "pack_version": "0.0.1-alpha",
+        }
+        config = {
+            "curseforge": {
+                "release_type": "auto",
+                "game_versions": [],
+                "minecraft_versions": {"26.1": 15933},
+                "java_versions": [],
+                "environment": [],
+                "loaders": {"fabric": [7499]},
+            }
+        }
+        with TemporaryDirectory() as tmp:
+            changelog = Path(tmp) / "changelog.md"
+            changelog.write_text("changes")
+            with patch.object(publish, "changelog_path", return_value=changelog):
+                metadata, missing = publish.curseforge_upload_metadata(
+                    manifest,
+                    config,
+                    {},
+                    allow_network=False,
+                )
+
+        self.assertEqual(missing, [])
+        self.assertEqual(metadata["releaseType"], "alpha")
+
     def test_modrinth_version_type_auto_uses_pack_version_channel(self) -> None:
         manifest = {
             "minecraft_version": "26.1",
@@ -412,6 +595,89 @@ class PublishTests(TestCase):
         self.assertTrue(ok)
         data = json.loads(post_multipart.call_args.args[2]["data"])
         self.assertEqual(data["version_type"], "beta")
+
+    def test_modrinth_version_type_auto_supports_alpha(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v0.0.1-alpha",
+            "pack_version": "0.0.1-alpha",
+        }
+        config = {
+            "modrinth": {
+                "project_id": "project",
+                "version_type": "auto",
+                "loaders": {"fabric": ["fabric"]},
+                "featured": True,
+            }
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / f"{publish.artifact_slug(manifest)}.mrpack"
+            artifact.write_text("pack")
+            changelog = root / "changelog.md"
+            changelog.write_text("changes")
+            with (
+                patch.object(publish, "platform_dir", return_value=root),
+                patch.object(publish, "changelog_path", return_value=changelog),
+                patch.object(publish, "post_multipart", return_value=(200, "ok")) as post_multipart,
+            ):
+                ok = publish.upload_modrinth(
+                    manifest,
+                    config,
+                    {"modrinth_token": "token"},
+                    dry_run=False,
+                )
+
+        self.assertTrue(ok)
+        data = json.loads(post_multipart.call_args.args[2]["data"])
+        self.assertEqual(data["version_type"], "alpha")
+
+    def test_modrinth_upload_syncs_project_side_metadata(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1",
+            "loader": "fabric",
+            "build_folder": "Kernova fabric 26.1 v1.0.0-release",
+            "pack_version": "1.0.0-release",
+        }
+        config = {
+            "modrinth": {
+                "project_id": "project",
+                "version_type": "auto",
+                "client_side": "required",
+                "server_side": "unsupported",
+                "loaders": {"fabric": ["fabric"]},
+                "featured": True,
+            }
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / f"{publish.artifact_slug(manifest)}.mrpack"
+            artifact.write_text("pack")
+            changelog = root / "changelog.md"
+            changelog.write_text("changes")
+            with (
+                patch.object(publish, "platform_dir", return_value=root),
+                patch.object(publish, "changelog_path", return_value=changelog),
+                patch.object(publish, "patch_json", return_value=(204, "")) as patch_json,
+                patch.object(publish, "post_multipart", return_value=(200, "ok")),
+            ):
+                ok = publish.upload_modrinth(
+                    manifest,
+                    config,
+                    {"modrinth_token": "token"},
+                    dry_run=False,
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            patch_json.call_args.args[2],
+            {"client_side": "required", "server_side": "unsupported"},
+        )
+
+    def test_invalid_publish_release_type_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            publish.publish_release_type({"pack_version": "1.0.0-release"}, {"release_type": "stable"}, "release_type")
 
     def test_neoforge_dependency_prefix_matches_exact_minecraft_patch(self) -> None:
         self.assertEqual(publish.neoforge_maven_prefix("1.21"), "21.0.")
@@ -486,3 +752,52 @@ class PublishTests(TestCase):
         self.assertTrue(upload_build.call_args_list[0].args[0].dry_run)
         self.assertEqual(upload_build.call_args_list[1].args[0].platform, "modrinth")
         sync_update_json.assert_not_called()
+
+    def test_sync_update_json_copies_split_feeds_and_docs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            local = root / "local"
+            remote = root / "remote"
+            local.mkdir()
+            remote.mkdir()
+            (remote / "README.md").write_text(
+                "# Kernova Update Feed\n\n"
+                "Public PackPing update feed for the Kernova Minecraft modpack.\n\n"
+                "The feed is generated by the Kernova release automation and served from GitHub Pages as `update.json`."
+            )
+            (local / "update.modrinth.json").write_text("")
+            (local / "update.curseforge.json").write_text("")
+            config = {
+                "packping": {
+                    "remote_repo": str(remote),
+                    "platforms": {
+                        "modrinth": {
+                            "update_json": str(local / "update.modrinth.json"),
+                            "remote_file": "update.modrinth.json",
+                        },
+                        "curseforge": {
+                            "update_json": str(local / "update.curseforge.json"),
+                            "remote_file": "update.curseforge.json",
+                        },
+                    },
+                }
+            }
+            args = Namespace(
+                remote_repo=None,
+                remote_file=None,
+                commit=False,
+                push=False,
+                message=None,
+                init_repo=False,
+            )
+
+            code = publish.sync_update_json(args, config)
+
+            self.assertEqual(code, 0)
+            self.assertTrue((remote / "update.modrinth.json").exists())
+            self.assertTrue((remote / "update.curseforge.json").exists())
+            self.assertTrue((remote / "README.md").exists())
+            self.assertTrue((remote / "LICENSE").exists())
+            self.assertEqual(json.loads((remote / "update.modrinth.json").read_text()), [])
+            self.assertEqual(json.loads((local / "update.modrinth.json").read_text()), [])
+            self.assertIn("update.modrinth.json", (remote / "README.md").read_text())

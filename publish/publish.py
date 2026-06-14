@@ -38,6 +38,9 @@ PACKPING_DIR = SCRIPT_DIR / "packping"
 CURSEFORGE_FINGERPRINTS_URL = "https://api.curseforge.com/v1/fingerprints"
 CURSEFORGE_FINGERPRINT_WHITESPACE = {9, 10, 13, 32}
 PUBLISH_CHANNELS = {"release", "beta", "alpha"}
+PACKPING_PLATFORMS = ("modrinth", "curseforge")
+PACKPING_CONFIG_REL = Path("config/packping.json")
+DEFAULT_PACKPING_REMOTE_BASE_URL = "https://stromblex.github.io/kernova-update"
 
 
 def load_json(path: Path, default: Any | None = None) -> Any:
@@ -46,6 +49,18 @@ def load_json(path: Path, default: Any | None = None) -> Any:
             return default
         raise FileNotFoundError(path)
     return json.loads(path.read_text())
+
+
+def load_packping_entries(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    text = path.read_text()
+    if not text.strip():
+        return []
+    entries = json.loads(text)
+    if not isinstance(entries, list):
+        raise ValueError(f"PackPing update JSON must be a list: {path}")
+    return entries
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -152,6 +167,30 @@ def write_icon(zf: zipfile.ZipFile, config: dict[str, Any], target: str) -> None
     path = icon_path(config)
     if path:
         zf.writestr(target, path.read_bytes())
+
+
+def write_build_file(
+    zf: zipfile.ZipFile,
+    build_dir: Path,
+    path: Path,
+    target_prefix: str,
+    config: dict[str, Any],
+    packping_platform: str | None = None,
+) -> None:
+    rel = path.relative_to(build_dir)
+    target = f"{target_prefix.rstrip('/')}/{rel.as_posix()}" if target_prefix else rel.as_posix()
+    if packping_platform and rel == PACKPING_CONFIG_REL:
+        zf.writestr(target, packping_config_for_platform(path, config, packping_platform))
+    else:
+        zf.write(path, target)
+
+
+def packping_config_for_platform(path: Path, config: dict[str, Any], platform: str) -> str:
+    data = load_json(path)
+    update_url = packping_update_url(config, platform)
+    if update_url:
+        data["updateUrl"] = update_url
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
 def iter_override_files(build_dir: Path) -> list[Path]:
@@ -293,6 +332,7 @@ def create_mrpack(
     manifest: dict[str, Any],
     config: dict[str, Any],
     out_dir: Path,
+    packping_platform: str = "modrinth",
 ) -> Path:
     name = build_display_name(manifest)
     artifact = out_dir / f"{artifact_slug(manifest)}.mrpack"
@@ -337,8 +377,7 @@ def create_mrpack(
         zf.writestr("modrinth.index.json", json.dumps(index, indent=2) + "\n")
         write_icon(zf, config, "overrides/icon.png")
         for path in iter_override_files(build_dir):
-            rel = path.relative_to(build_dir)
-            zf.write(path, f"overrides/{rel.as_posix()}")
+            write_build_file(zf, build_dir, path, "overrides", config, packping_platform)
 
     return artifact
 
@@ -434,7 +473,122 @@ def publish_release_type(manifest: dict[str, Any], platform_config: dict[str, An
     configured = str(platform_config.get(key, "auto") or "auto").lower()
     if configured == "auto":
         return pack_version_channel(str(manifest.get("pack_version", "")))
+    if configured not in PUBLISH_CHANNELS:
+        raise ValueError(f"{key} must be one of auto, release, beta, alpha; got {configured!r}.")
     return configured
+
+
+def packping_base_config(config: dict[str, Any]) -> dict[str, Any]:
+    packping = config.get("packping", {})
+    return packping if isinstance(packping, dict) else {}
+
+
+def packping_platform_names(config: dict[str, Any]) -> list[str]:
+    platforms = packping_base_config(config).get("platforms")
+    if not isinstance(platforms, dict) or not platforms:
+        return ["modrinth"]
+
+    names = [platform for platform in PACKPING_PLATFORMS if platform in platforms]
+    names.extend(sorted(str(platform) for platform in platforms if str(platform) not in names))
+    return names
+
+
+def packping_platform_config(config: dict[str, Any], platform: str | None = None) -> dict[str, Any]:
+    base = copy.deepcopy(packping_base_config(config))
+    platforms = base.pop("platforms", {})
+    if platform and isinstance(platforms, dict):
+        platform_config = platforms.get(platform, {})
+        if isinstance(platform_config, dict):
+            base.update(copy.deepcopy(platform_config))
+    return base
+
+
+def packping_update_path(config: dict[str, Any], platform: str | None = None) -> Path:
+    settings = packping_platform_config(config, platform)
+    return project_path(str(settings.get("update_json") or "publish/packping/update.json"))
+
+
+def packping_remote_file(config: dict[str, Any], platform: str | None = None) -> str:
+    settings = packping_platform_config(config, platform)
+    configured = str(settings.get("remote_file") or "").strip()
+    if configured:
+        return configured
+    return Path(str(settings.get("update_json") or "update.json")).name
+
+
+def packping_update_url(config: dict[str, Any], platform: str | None = None) -> str:
+    settings = packping_platform_config(config, platform)
+    configured = str(settings.get("update_url") or "").strip()
+    if configured:
+        return configured
+
+    base = str(
+        settings.get("remote_base_url")
+        or packping_base_config(config).get("remote_base_url")
+        or DEFAULT_PACKPING_REMOTE_BASE_URL
+    ).rstrip("/")
+    remote_file = packping_remote_file(config, platform).lstrip("/")
+    return f"{base}/{remote_file}" if base and remote_file else ""
+
+
+def packping_download_url(
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    platform: str,
+    artifact_name: str,
+) -> str:
+    settings = packping_platform_config(config, platform)
+    template = str(settings.get("download_url_template") or "")
+    base = str(settings.get("download_base_url") or "").rstrip("/")
+    version_number = f"{manifest['pack_version']}+{manifest['loader']}"
+    variables = {
+        "artifact": artifact_name,
+        "loader": manifest["loader"],
+        "minecraft": manifest["minecraft_version"],
+        "version": manifest["pack_version"],
+        "version_number": version_number,
+        "version_number_url": urllib.parse.quote(version_number, safe=""),
+        "build": artifact_slug(manifest),
+        "channel": pack_version_channel(str(manifest.get("pack_version", ""))),
+        "platform": platform,
+    }
+    if template:
+        return template.format(**variables)
+    if base:
+        return f"{base}/{artifact_name}"
+    return ""
+
+
+def packping_changelog(manifest: dict[str, Any], platform_changelog: str) -> str:
+    listed = [m for m in manifest["resolved_mods"] if m.get("source") == "list"]
+    listed_available = [m for m in listed if m.get("available")]
+    dependencies = [m for m in manifest["resolved_mods"] if m.get("source") == "dependency" and m.get("available")]
+    skipped = skipped_mods(manifest)
+    channel = pack_version_channel(str(manifest.get("pack_version", "")))
+
+    lines = [
+        f"## {build_display_name(manifest)}",
+        "",
+        f"- Minecraft: {manifest['minecraft_version']}",
+        f"- Loader: {manifest['loader']}",
+        f"- Pack version: {manifest['pack_version']} ({channel})",
+        (
+            f"- Mods: {len(available_mods(manifest))} available "
+            f"({len(listed_available)}/{len(listed)} listed + {len(dependencies)} dependencies)"
+        ),
+    ]
+
+    if skipped:
+        names = ", ".join(str(mod.get("name") or "Unknown") for mod in skipped)
+        lines.append(f"- Unavailable: {names}")
+    else:
+        lines.append("- Unavailable: none")
+
+    notes = extract_release_notes(platform_changelog)
+    if notes:
+        lines.extend(["", "### Notes", "", notes.strip()])
+
+    return "\n".join(lines).strip() + "\n"
 
 
 def dedupe_ints(values: list[Any]) -> list[int]:
@@ -821,13 +975,19 @@ def curseforge_modpack_file_entries(
     return sorted(entries, key=lambda item: (item["projectID"], item["fileID"])), excluded_paths
 
 
-def create_full_zip(build_dir: Path, manifest: dict[str, Any], out_dir: Path) -> Path:
+def create_full_zip(
+    build_dir: Path,
+    manifest: dict[str, Any],
+    out_dir: Path,
+    config: dict[str, Any],
+    packping_platform: str = "modrinth",
+) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = out_dir / f"{artifact_slug(manifest)}-full.zip"
     with zipfile.ZipFile(artifact, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in sorted(build_dir.rglob("*")):
             if path.is_file() and path.name != "build_manifest.json":
-                zf.write(path, path.relative_to(build_dir).as_posix())
+                write_build_file(zf, build_dir, path, "", config, packping_platform)
     return artifact
 
 
@@ -837,6 +997,7 @@ def create_curseforge_modpack_zip(
     config: dict[str, Any],
     out_dir: Path,
     secrets: dict[str, Any] | None = None,
+    packping_platform: str = "curseforge",
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = out_dir / f"{artifact_slug(manifest)}-curseforge.zip"
@@ -866,8 +1027,7 @@ def create_curseforge_modpack_zip(
         zf.writestr("modlist.html", curseforge_modlist_html(manifest))
         write_icon(zf, config, "overrides/icon.png")
         for path in iter_curseforge_override_files(build_dir, excluded_mod_paths):
-            rel = path.relative_to(build_dir)
-            zf.write(path, f"overrides/{rel.as_posix()}")
+            write_build_file(zf, build_dir, path, "overrides", config, packping_platform)
 
     return artifact
 
@@ -902,6 +1062,7 @@ def create_prism_zip(
     manifest: dict[str, Any],
     config: dict[str, Any],
     out_dir: Path,
+    packping_platform: str = "modrinth",
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = out_dir / f"{artifact_slug(manifest)}-prism.zip"
@@ -917,8 +1078,7 @@ def create_prism_zip(
         write_icon(zf, config, "minecraft/icon.png")
         for path in sorted(build_dir.rglob("*")):
             if path.is_file() and path.name != "build_manifest.json":
-                rel = path.relative_to(build_dir)
-                zf.write(path, f"minecraft/{rel.as_posix()}")
+                write_build_file(zf, build_dir, path, "minecraft", config, packping_platform)
     return artifact
 
 
@@ -1041,24 +1201,13 @@ def create_packping_entry(
     manifest: dict[str, Any],
     config: dict[str, Any],
     out_dir: Path,
+    platform: str,
     artifact_name: str,
     changelog: str,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    packping = config.get("packping", {})
-    template = packping.get("download_url_template", "")
-    base = packping.get("download_base_url", "").rstrip("/")
-    download = ""
-    if template:
-        download = template.format(
-            artifact=artifact_name,
-            loader=manifest["loader"],
-            minecraft=manifest["minecraft_version"],
-            version=manifest["pack_version"],
-            build=artifact_slug(manifest),
-        )
-    elif base:
-        download = f"{base}/{artifact_name}"
+    packping = packping_platform_config(config, platform)
+    download = packping_download_url(manifest, config, platform, artifact_name)
 
     entry = {
         "minecraft": manifest["minecraft_version"],
@@ -1075,24 +1224,26 @@ def create_packping_entry(
             }
         })),
     }
-    if should_include_minecraft_upgrade_toast(entry, config):
+    if should_include_minecraft_upgrade_toast(entry, config, platform):
         entry["toast"] = minecraft_upgrade_toast(entry, config, entry["minecraft"])
         entry.setdefault("settings", {}).setdefault("notifications", {})["showToast"] = True
-    path = out_dir / f"{artifact_slug(manifest)}.packping-entry.json"
+    path = out_dir / f"{artifact_slug(manifest)}.{platform}.packping-entry.json"
     write_json(path, entry)
-    update_packping_json(entry, config)
+    update_packping_json(entry, config, platform)
     return path
 
 
-def should_include_minecraft_upgrade_toast(entry: dict[str, Any], config: dict[str, Any]) -> bool:
-    packping = config.get("packping", {})
+def should_include_minecraft_upgrade_toast(
+    entry: dict[str, Any],
+    config: dict[str, Any],
+    platform: str | None = None,
+) -> bool:
+    packping = packping_platform_config(config, platform)
     if not packping.get("toast_on_minecraft_upgrade", False):
         return False
 
-    path = project_path(packping.get("update_json", "update.json"))
-    existing = load_json(path, default=[])
-    if not isinstance(existing, list):
-        return False
+    path = packping_update_path(config, platform)
+    existing = load_packping_entries(path)
 
     loader = entry.get("loader", "")
     minecraft = str(entry.get("minecraft", ""))
@@ -1108,13 +1259,15 @@ def should_include_minecraft_upgrade_toast(entry: dict[str, Any], config: dict[s
     return version_sort_key(minecraft) > version_sort_key(latest_previous)
 
 
-def update_packping_json(entry: dict[str, Any], config: dict[str, Any]) -> Path:
-    path = project_path(config.get("packping", {}).get("update_json", "update.json"))
-    entries = load_json(path, default=[])
-    if not isinstance(entries, list):
-        raise ValueError(f"PackPing update JSON must be a list: {path}")
+def update_packping_json(
+    entry: dict[str, Any],
+    config: dict[str, Any],
+    platform: str | None = None,
+) -> Path:
+    path = packping_update_path(config, platform)
+    entries = load_packping_entries(path)
 
-    is_minecraft_upgrade = should_include_minecraft_upgrade_toast(entry, config)
+    is_minecraft_upgrade = should_include_minecraft_upgrade_toast(entry, config, platform)
     kept = [
         item for item in entries
         if not (
@@ -1209,26 +1362,43 @@ def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_di
     changelog_file.parent.mkdir(parents=True, exist_ok=True)
 
     changelog = compose_changelog(manifest, args.notes_file)
+    feed_changelog = packping_changelog(manifest, changelog)
     changelog_file.write_text(changelog)
 
-    mrpack = create_mrpack(build_dir, manifest, config, modrinth_dir)
+    mrpack = create_mrpack(build_dir, manifest, config, modrinth_dir, "modrinth")
     curseforge_zip = create_curseforge_modpack_zip(
         build_dir,
         manifest,
         config,
         platform_dir(CURSEFORGE_DIR, manifest),
         secrets,
+        "curseforge",
     )
-    full_zip = create_full_zip(build_dir, manifest, full_dir)
-    prism_zip = create_prism_zip(build_dir, manifest, config, prism_dir)
-    packping_entry = create_packping_entry(manifest, config, packping_dir, mrpack.name, changelog)
+    full_zip = create_full_zip(build_dir, manifest, full_dir, config, "modrinth")
+    prism_zip = create_prism_zip(build_dir, manifest, config, prism_dir, "modrinth")
+    packping_artifacts = {
+        "modrinth": mrpack.name,
+        "curseforge": curseforge_zip.name,
+    }
+    packping_entries = [
+        create_packping_entry(
+            manifest,
+            config,
+            packping_dir,
+            platform,
+            packping_artifacts.get(platform, mrpack.name),
+            feed_changelog,
+        )
+        for platform in packping_platform_names(config)
+    ]
 
     print(f"[OK] Modrinth pack: {mrpack}")
     print(f"[OK] CurseForge modpack zip: {curseforge_zip}")
     print(f"[OK] Full test zip: {full_zip}")
     print(f"[OK] Prism import zip: {prism_zip}")
     print(f"[OK] Changelog: {changelog_file}")
-    print(f"[OK] PackPing entry: {packping_entry}")
+    for packping_entry in packping_entries:
+        print(f"[OK] PackPing entry: {packping_entry}")
     
 
 def package_build(args: argparse.Namespace) -> int:
@@ -1339,11 +1509,14 @@ def upload_modrinth(
     }
     if dry_run:
         print(f"[DRY] Modrinth upload {artifact.name}: {data['version_number']}")
+        sync_modrinth_project_metadata(config, token, dry_run=True)
         if not project_id or not token:
             print("      Missing real Modrinth project_id/token; this is OK for dry-run.")
         return True
     if not project_id or not token:
         print("[ERROR] Modrinth project_id/token is not configured.")
+        return False
+    if not sync_modrinth_project_metadata(config, token, dry_run=False):
         return False
 
     status, body = post_multipart(
@@ -1356,6 +1529,43 @@ def upload_modrinth(
         print(f"[OK] Modrinth uploaded: {artifact.name}")
         return True
     print(f"[ERROR] Modrinth {status}: {body}")
+    return False
+
+
+def modrinth_project_side_metadata(config: dict[str, Any]) -> dict[str, str]:
+    modrinth = config.get("modrinth", {})
+    metadata: dict[str, str] = {}
+    for key in ("client_side", "server_side"):
+        value = str(modrinth.get(key) or "").strip().lower()
+        if value:
+            if value not in {"required", "optional", "unsupported", "unknown"}:
+                raise ValueError(f"modrinth.{key} must be required, optional, unsupported, or unknown.")
+            metadata[key] = value
+    return metadata
+
+
+def sync_modrinth_project_metadata(config: dict[str, Any], token: str, dry_run: bool) -> bool:
+    modrinth = config.get("modrinth", {})
+    project_id = str(modrinth.get("project_id") or "").strip()
+    metadata = modrinth_project_side_metadata(config)
+    if not metadata:
+        return True
+    if dry_run:
+        print(f"[DRY] Modrinth project side metadata {project_id or '<missing project>'}: {metadata}")
+        return True
+    if not project_id or not token:
+        print("[ERROR] Modrinth project_id/token is not configured.")
+        return False
+
+    status, body = patch_json(
+        f"https://api.modrinth.com/v2/project/{urllib.parse.quote(project_id, safe='')}",
+        {"Authorization": token},
+        metadata,
+    )
+    if status == 204:
+        print(f"[OK] Modrinth project side metadata synced: {metadata}")
+        return True
+    print(f"[ERROR] Modrinth project metadata {status}: {body}")
     return False
 
 
@@ -1406,42 +1616,95 @@ def upload_curseforge(
 def sync_update_json(args: argparse.Namespace, config: dict[str, Any] | None = None) -> int:
     config = config or load_json(CONFIG_PATH)
     packping = config.get("packping", {})
-    local_update = project_path(packping.get("update_json", "update.json"))
     remote_repo = Path(args.remote_repo or packping.get("remote_repo", ""))
-    remote_file = args.remote_file or packping.get("remote_file", "update.json")
     if not remote_repo:
         print("[ERROR] packping.remote_repo is not configured.")
         return 1
-    if not local_update.exists():
-        print(f"[ERROR] Local update JSON does not exist: {local_update}")
-        return 1
-    if not validate_packping_feed_file(local_update):
-        return 1
 
-    remote_update = remote_repo / remote_file
-    remote_update.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(local_update, remote_update)
-    print(f"[OK] Synced PackPing update JSON: {remote_update}")
-    if not validate_packping_feed_file(remote_update):
-        return 1
+    synced_files: list[str] = []
+    for local_update, remote_file in packping_sync_targets(config, args.remote_file):
+        try:
+            entries = load_packping_entries(local_update)
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            print(f"[ERROR] Invalid PackPing update JSON {local_update}: {error}")
+            return 1
+        write_json(local_update, entries)
+        if not validate_packping_feed_file(local_update):
+            return 1
+
+        remote_update = remote_repo / remote_file
+        write_json(remote_update, entries)
+        print(f"[OK] Synced PackPing update JSON: {remote_update}")
+        if not validate_packping_feed_file(remote_update):
+            return 1
+        synced_files.append(remote_file)
+
+    synced_files.extend(ensure_update_repo_docs(remote_repo, synced_files))
 
     if not args.commit:
         return 0
     ensure_git_repo(remote_repo, packping, getattr(args, "init_repo", False))
 
-    run_git(remote_repo, ["add", remote_file])
+    run_git(remote_repo, ["add", *synced_files])
     if not git_has_staged_changes(remote_repo):
-        print("[OK] Remote update JSON has no changes to commit.")
+        print("[OK] Remote update repo has no changes to commit.")
         return 0
 
     message = args.message or packping.get("commit_message", "chore: update Kernova PackPing feed")
     run_git(remote_repo, ["commit", "-m", message])
-    print(f"[OK] Committed remote update JSON: {message}")
+    print(f"[OK] Committed remote update repo: {message}")
     if args.push:
         branch = packping.get("remote_branch", "main")
         run_git(remote_repo, ["push", "origin", branch])
         print("[OK] Pushed remote update repo.")
     return 0
+
+
+def packping_sync_targets(
+    config: dict[str, Any],
+    remote_file_override: str | None = None,
+) -> list[tuple[Path, str]]:
+    if remote_file_override:
+        return [(packping_update_path(config, packping_platform_names(config)[0]), remote_file_override)]
+    return [
+        (packping_update_path(config, platform), packping_remote_file(config, platform))
+        for platform in packping_platform_names(config)
+    ]
+
+
+def ensure_update_repo_docs(remote_repo: Path, remote_files: list[str]) -> list[str]:
+    synced: list[str] = []
+    readme = remote_repo / "README.md"
+    generated_readme = default_update_repo_readme(remote_files)
+    if not readme.exists() or is_legacy_update_repo_readme(readme.read_text()):
+        readme.write_text(generated_readme)
+    if readme.exists():
+        synced.append("README.md")
+
+    license_path = remote_repo / "LICENSE"
+    source_license = PROJECT_ROOT / "LICENSE"
+    if not license_path.exists() and source_license.exists():
+        shutil.copy2(source_license, license_path)
+    if license_path.exists():
+        synced.append("LICENSE")
+    return synced
+
+
+def default_update_repo_readme(remote_files: list[str]) -> str:
+    feed_lines = "\n".join(f"- `{name}`" for name in remote_files) or "- PackPing feed JSON"
+    return (
+        "# Kernova Update Feed\n\n"
+        "Public PackPing update feeds for the Kernova Minecraft modpack.\n\n"
+        f"{feed_lines}\n"
+    )
+
+
+def is_legacy_update_repo_readme(text: str) -> bool:
+    return text.strip() == (
+        "# Kernova Update Feed\n\n"
+        "Public PackPing update feed for the Kernova Minecraft modpack.\n\n"
+        "The feed is generated by the Kernova release automation and served from GitHub Pages as `update.json`."
+    )
 
 
 def ensure_git_repo(repo: Path, packping: dict[str, Any], init_repo: bool) -> None:
@@ -1502,8 +1765,8 @@ def git_command(repo: Path, args: list[str]) -> list[str]:
 
 def validate_packping_feed_file(path: Path) -> bool:
     try:
-        entries = load_json(path)
-    except (OSError, json.JSONDecodeError) as error:
+        entries = load_packping_entries(path)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"[ERROR] Invalid PackPing update JSON {path}: {error}")
         return False
     errors = packping_feed_errors(entries)
@@ -1515,8 +1778,6 @@ def validate_packping_feed_file(path: Path) -> bool:
 def packping_feed_errors(entries: Any) -> list[str]:
     if not isinstance(entries, list):
         return ["root value must be a list"]
-    if not entries:
-        return ["feed must contain at least one entry"]
     errors: list[str] = []
     seen: set[tuple[str, str]] = set()
     for index, entry in enumerate(entries):
@@ -1566,6 +1827,20 @@ def post_multipart(
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode("utf-8", "replace")
+
+
+def patch_json(url: str, headers: dict[str, str], data: dict[str, Any]) -> tuple[int, str]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(data).encode("utf-8"),
+        headers={**headers, "Content-Type": "application/json"},
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode("utf-8", "replace")
 
