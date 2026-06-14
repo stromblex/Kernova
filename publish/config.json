@@ -60,8 +60,8 @@
     "minecraft_version_type_ids": {
       "26.1": 83806
     },
-    "java_versions": [11135],
-    "environment": [9638],
+    "java_versions": [],
+    "environment": [],
     "loaders": {
       "fabric": [7499],
       "neoforge": [10150]

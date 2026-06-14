@@ -1484,7 +1484,7 @@ def git_has_staged_changes(repo: Path) -> bool:
 
 
 def git_command(repo: Path, args: list[str]) -> list[str]:
-    return ["git", "-c", f"safe.directory={repo}", *args]
+    return ["git", "-c", f"safe.directory={repo.resolve()}", *args]
 
 
 def validate_packping_feed_file(path: Path) -> bool:
