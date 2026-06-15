@@ -421,11 +421,23 @@ class PublishTests(TestCase):
 
         self.assertEqual(
             publish.packping_download_url(manifest, config, "modrinth", "artifact.mrpack"),
-            "https://modrinth.example/1.0.0-release%2Bfabric",
+            "https://modrinth.example/1.0.0-release%2Bfabric.mc26.1",
         )
         self.assertEqual(
             publish.packping_download_url(manifest, config, "curseforge", "artifact.zip"),
             "https://curseforge.example/26.1/fabric",
+        )
+
+    def test_modrinth_version_number_includes_minecraft_version(self) -> None:
+        manifest = {
+            "minecraft_version": "26.1.1",
+            "loader": "neoforge",
+            "pack_version": "0.1.0-beta",
+        }
+
+        self.assertEqual(
+            publish.modrinth_version_number(manifest),
+            "0.1.0-beta+neoforge.mc26.1.1",
         )
 
     def test_minecraft_upgrade_toast_renders_placeholders(self) -> None:
@@ -596,6 +608,7 @@ class PublishTests(TestCase):
         self.assertTrue(ok)
         data = json.loads(post_multipart.call_args.args[2]["data"])
         self.assertEqual(data["version_type"], "beta")
+        self.assertEqual(data["version_number"], "0.1.0-beta+fabric.mc26.1")
 
     def test_modrinth_version_type_auto_supports_alpha(self) -> None:
         manifest = {

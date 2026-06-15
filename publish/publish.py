@@ -669,7 +669,7 @@ def packping_download_url(
     settings = packping_platform_config(config, platform)
     template = str(settings.get("download_url_template") or "")
     base = str(settings.get("download_base_url") or "").rstrip("/")
-    version_number = f"{manifest['pack_version']}+{manifest['loader']}"
+    version_number = modrinth_version_number(manifest)
     variables = {
         "artifact": artifact_name,
         "loader": manifest["loader"],
@@ -686,6 +686,11 @@ def packping_download_url(
     if base:
         return f"{base}/{artifact_name}"
     return ""
+
+
+def modrinth_version_number(manifest: dict[str, Any]) -> str:
+    """Return a project-wide unique Modrinth version number."""
+    return f"{manifest['pack_version']}+{manifest['loader']}.mc{manifest['minecraft_version']}"
 
 
 def packping_changelog(manifest: dict[str, Any], platform_changelog: str) -> str:
@@ -1624,7 +1629,7 @@ def upload_modrinth(
 
     data = {
         "name": build_display_name(manifest),
-        "version_number": f"{manifest['pack_version']}+{manifest['loader']}",
+        "version_number": modrinth_version_number(manifest),
         "changelog": changelog,
         "dependencies": [],
         "game_versions": [manifest["minecraft_version"]],
