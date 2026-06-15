@@ -16,4 +16,3 @@ Output:
 - `builds/` - generated Minecraft instances with downloaded mods.
 - `changelogs/` - generated release changelogs.
 - `updater/state/version_history.json` - local build/version history.
-
