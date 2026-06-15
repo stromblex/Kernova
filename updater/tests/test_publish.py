@@ -353,7 +353,7 @@ class PublishTests(TestCase):
             self.assertNotIn("toast", newest_entry)
             self.assertFalse(newest_entry["settings"]["notifications"]["showToast"])
 
-    def test_packping_minecraft_upgrade_notice_requires_higher_pack_version(self) -> None:
+    def test_packping_minecraft_upgrade_notice_keeps_build_version_and_uses_homepage(self) -> None:
         with TemporaryDirectory() as tmp:
             update_json = Path(tmp) / "update.json"
             update_json.write_text(
@@ -372,8 +372,13 @@ class PublishTests(TestCase):
             )
             config = {
                 "packping": {
-                    "update_json": str(update_json),
                     "toast_on_minecraft_upgrade": True,
+                    "platforms": {
+                        "modrinth": {
+                            "update_json": str(update_json),
+                            "project_url": "https://modrinth.com/modpack/kernova",
+                        }
+                    },
                     "minecraft_upgrade_toast": {
                         "title": "Minecraft %minecraft%",
                         "subtitle": "%pack_version% on %loader%",
@@ -389,15 +394,17 @@ class PublishTests(TestCase):
                 "settings": {"notifications": {"showToast": False}},
             }
 
-            publish.update_packping_json(old_entry, config)
+            publish.update_packping_json(old_entry, config, "modrinth")
 
             entries = json.loads(update_json.read_text())
             repackaged_old = next(item for item in entries if item["minecraft"] == "26.1")
-            self.assertEqual(repackaged_old["download"], "older")
+            self.assertEqual(repackaged_old["version"], "1.0.1-release")
             self.assertEqual(repackaged_old["changelog"], "older same-Minecraft changes")
-            self.assertNotIn("upgradeMinecraft", repackaged_old)
-            self.assertNotIn("toast", repackaged_old)
-            self.assertFalse(repackaged_old["settings"]["notifications"]["showToast"])
+            self.assertEqual(repackaged_old["upgradeMinecraft"], "26.1.1")
+            self.assertEqual(repackaged_old["download"], "https://modrinth.com/modpack/kernova")
+            self.assertEqual(repackaged_old["toast"]["title"], "Minecraft 26.1.1")
+            self.assertEqual(repackaged_old["toast"]["subtitle"], "1.0.0-release on fabric")
+            self.assertTrue(repackaged_old["settings"]["notifications"]["showToast"])
 
     def test_update_packping_json_does_not_downgrade_same_minecraft_build(self) -> None:
         with TemporaryDirectory() as tmp:

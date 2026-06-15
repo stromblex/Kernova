@@ -41,6 +41,10 @@ PUBLISH_CHANNELS = {"release", "beta", "alpha"}
 PACKPING_PLATFORMS = ("modrinth", "curseforge")
 PACKPING_CONFIG_REL = Path("config/packping.json")
 DEFAULT_PACKPING_REMOTE_BASE_URL = "https://stromblex.github.io/kernova-update"
+PACKPING_PROJECT_URLS = {
+    "modrinth": "https://modrinth.com/modpack/kernova",
+    "curseforge": "https://www.curseforge.com/minecraft/modpacks/kernova",
+}
 GENERATED_NOTE_SECTIONS = {
     "build details",
     "mods",
@@ -686,6 +690,14 @@ def packping_download_url(
     if base:
         return f"{base}/{artifact_name}"
     return ""
+
+
+def packping_project_url(config: dict[str, Any], platform: str | None = None) -> str:
+    settings = packping_platform_config(config, platform)
+    configured = str(settings.get("project_url") or settings.get("download_home_url") or "").strip()
+    if configured:
+        return configured
+    return PACKPING_PROJECT_URLS.get(str(platform or ""), "")
 
 
 def modrinth_version_number(manifest: dict[str, Any]) -> str:
@@ -1420,13 +1432,10 @@ def apply_minecraft_upgrade_notices(
         current_minecraft = str(entry.get("minecraft", ""))
         newest_entry = newest_by_loader.get(loader, {})
         newest_minecraft = str(newest_entry.get("minecraft", ""))
-        newest_pack_version = str(newest_entry.get("version", ""))
-        current_pack_version = str(entry.get("version", ""))
         has_newer_minecraft = (
             bool(current_minecraft)
             and bool(newest_minecraft)
             and version_sort_key(current_minecraft) < version_sort_key(newest_minecraft)
-            and version_sort_key(current_pack_version) < version_sort_key(newest_pack_version)
         )
 
         settings = copy.deepcopy(entry.get("settings") or packping.get("remote_settings", {}))
@@ -1434,6 +1443,9 @@ def apply_minecraft_upgrade_notices(
         entry["settings"] = settings
         if has_newer_minecraft:
             entry["upgradeMinecraft"] = newest_minecraft
+            project_url = packping_project_url(config, platform)
+            if project_url:
+                entry["download"] = project_url
             entry["toast"] = minecraft_upgrade_toast(newest_entry, config, newest_minecraft)
         else:
             entry.pop("upgradeMinecraft", None)

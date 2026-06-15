@@ -12,13 +12,15 @@
         "update_json": "publish/packping/update.modrinth.json",
         "remote_file": "update.modrinth.json",
         "update_url": "https://stromblex.github.io/kernova-update/update.modrinth.json",
-        "download_url_template": "https://modrinth.com/modpack/kernova/version/{version_number_url}"
+        "project_url": "https://modrinth.com/modpack/kernova",
+        "download_url_template": "https://modrinth.com/modpack/kernova"
       },
       "curseforge": {
         "update_json": "publish/packping/update.curseforge.json",
         "remote_file": "update.curseforge.json",
         "update_url": "https://stromblex.github.io/kernova-update/update.curseforge.json",
-        "download_url_template": "https://www.curseforge.com/minecraft/modpacks/kernova/files/all?page=1&pageSize=20&version={minecraft}"
+        "project_url": "https://www.curseforge.com/minecraft/modpacks/kernova",
+        "download_url_template": "https://www.curseforge.com/minecraft/modpacks/kernova"
       }
     },
     "toast_on_minecraft_upgrade": true,
