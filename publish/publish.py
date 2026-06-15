@@ -694,35 +694,32 @@ def modrinth_version_number(manifest: dict[str, Any]) -> str:
 
 
 def packping_changelog(manifest: dict[str, Any], platform_changelog: str) -> str:
-    listed = [m for m in manifest["resolved_mods"] if m.get("source") == "list"]
-    listed_available = [m for m in listed if m.get("available")]
-    dependencies = [m for m in manifest["resolved_mods"] if m.get("source") == "dependency" and m.get("available")]
-    skipped = skipped_mods(manifest)
-    channel = pack_version_channel(str(manifest.get("pack_version", "")))
+    summary = packping_changelog_summary(manifest)
+    return f"{summary}\nSee more on Download.\n"
 
-    lines = [
-        f"## {build_display_name(manifest)}",
-        "",
-        f"- Minecraft: {manifest['minecraft_version']}",
-        f"- Loader: {manifest['loader']}",
-        f"- Pack version: {manifest['pack_version']} ({channel})",
-        (
-            f"- Mods: {len(available_mods(manifest))} available "
-            f"({len(listed_available)}/{len(listed)} listed + {len(dependencies)} dependencies)"
-        ),
-    ]
 
-    if skipped:
-        names = ", ".join(str(mod.get("name") or "Unknown") for mod in skipped)
-        lines.append(f"- Unavailable: {names}")
-    else:
-        lines.append("- Unavailable: none")
+def packping_changelog_summary(manifest: dict[str, Any]) -> str:
+    previous = find_previous_manifest(manifest)
+    if not previous:
+        return "New Kernova build for this Minecraft version."
 
-    notes = extract_release_notes(platform_changelog)
-    if notes:
-        lines.extend(["", "### Notes", "", notes.strip()])
+    updated, added, removed = manifest_delta_counts(manifest, previous)
+    if updated or added or removed:
+        return "Updated mods and dependencies."
+    return "Bug fixes and pack maintenance."
 
-    return "\n".join(lines).strip() + "\n"
+
+def manifest_delta_counts(manifest: dict[str, Any], previous: dict[str, Any]) -> tuple[int, int, int]:
+    current_mods = available_mod_index(manifest)
+    previous_mods = available_mod_index(previous)
+    added = len(current_mods.keys() - previous_mods.keys())
+    removed = len(previous_mods.keys() - current_mods.keys())
+    updated = sum(
+        1
+        for key in current_mods.keys() & previous_mods.keys()
+        if mod_version_signature(previous_mods[key]) != mod_version_signature(current_mods[key])
+    )
+    return updated, added, removed
 
 
 def dedupe_ints(values: list[Any]) -> list[int]:
@@ -1357,39 +1354,10 @@ def create_packping_entry(
             }
         })),
     }
-    if should_include_minecraft_upgrade_toast(entry, config, platform):
-        entry["toast"] = minecraft_upgrade_toast(entry, config, entry["minecraft"])
-        entry.setdefault("settings", {}).setdefault("notifications", {})["showToast"] = True
     path = out_dir / f"{artifact_slug(manifest)}.{platform}.packping-entry.json"
     write_json(path, entry)
     update_packping_json(entry, config, platform)
     return path
-
-
-def should_include_minecraft_upgrade_toast(
-    entry: dict[str, Any],
-    config: dict[str, Any],
-    platform: str | None = None,
-) -> bool:
-    packping = packping_platform_config(config, platform)
-    if not packping.get("toast_on_minecraft_upgrade", False):
-        return False
-
-    path = packping_update_path(config, platform)
-    existing = load_packping_entries(path)
-
-    loader = entry.get("loader", "")
-    minecraft = str(entry.get("minecraft", ""))
-    previous_minecraft_versions = [
-        str(item.get("minecraft", ""))
-        for item in existing
-        if item.get("loader", "") == loader and item.get("minecraft") != minecraft
-    ]
-    if not previous_minecraft_versions:
-        return False
-
-    latest_previous = sorted(previous_minecraft_versions, key=version_sort_key)[-1]
-    return version_sort_key(minecraft) > version_sort_key(latest_previous)
 
 
 def update_packping_json(
@@ -1400,50 +1368,77 @@ def update_packping_json(
     path = packping_update_path(config, platform)
     entries = load_packping_entries(path)
 
-    is_minecraft_upgrade = should_include_minecraft_upgrade_toast(entry, config, platform)
-    kept = [
-        item for item in entries
-        if not (
+    kept: list[dict[str, Any]] = []
+    incoming_used = False
+    for item in entries:
+        if (
             item.get("minecraft") == entry.get("minecraft")
             and item.get("loader", "") == entry.get("loader", "")
-        )
-    ]
-    if is_minecraft_upgrade:
-        apply_minecraft_upgrade_notices(kept, entry, config)
-    kept.append(entry)
+        ):
+            kept.append(newer_packping_entry(item, entry))
+            incoming_used = True
+        else:
+            kept.append(item)
+    if not incoming_used:
+        kept.append(entry)
+    apply_minecraft_upgrade_notices(kept, config, platform)
     kept.sort(key=lambda item: (version_sort_key(item.get("minecraft", "0")), item.get("loader", "")))
     write_json(path, kept)
     return path
 
 
+def newer_packping_entry(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    existing_version = str(existing.get("version", ""))
+    incoming_version = str(incoming.get("version", ""))
+    if version_sort_key(incoming_version) < version_sort_key(existing_version):
+        return existing
+    return incoming
+
+
 def apply_minecraft_upgrade_notices(
     entries: list[dict[str, Any]],
-    newest_entry: dict[str, Any],
     config: dict[str, Any],
+    platform: str | None = None,
 ) -> None:
-    newest_minecraft = str(newest_entry.get("minecraft", ""))
-    newest_loader = str(newest_entry.get("loader", ""))
+    packping = packping_platform_config(config, platform)
+    if not packping.get("toast_on_minecraft_upgrade", False):
+        return
+
+    newest_by_loader: dict[str, dict[str, Any]] = {}
     for entry in entries:
-        if str(entry.get("loader", "")) != newest_loader:
+        loader = str(entry.get("loader", ""))
+        minecraft = str(entry.get("minecraft", ""))
+        if not loader or not minecraft:
             continue
+        previous = newest_by_loader.get(loader)
+        previous_minecraft = str(previous.get("minecraft", "")) if previous else ""
+        if previous is None or version_sort_key(minecraft) > version_sort_key(previous_minecraft):
+            newest_by_loader[loader] = entry
+
+    for entry in entries:
+        loader = str(entry.get("loader", ""))
         current_minecraft = str(entry.get("minecraft", ""))
-        if not current_minecraft or version_sort_key(current_minecraft) >= version_sort_key(newest_minecraft):
-            continue
-        entry["upgradeMinecraft"] = newest_minecraft
-        entry["version"] = newest_entry.get("version", "")
-        entry["download"] = newest_entry.get("download", "")
-        entry["changelog"] = minecraft_upgrade_changelog(newest_entry)
-        entry["toast"] = minecraft_upgrade_toast(newest_entry, config, newest_minecraft)
-        settings = copy.deepcopy(entry.get("settings") or config.get("packping", {}).get("remote_settings", {}))
+        newest_entry = newest_by_loader.get(loader, {})
+        newest_minecraft = str(newest_entry.get("minecraft", ""))
+        newest_pack_version = str(newest_entry.get("version", ""))
+        current_pack_version = str(entry.get("version", ""))
+        has_newer_minecraft = (
+            bool(current_minecraft)
+            and bool(newest_minecraft)
+            and version_sort_key(current_minecraft) < version_sort_key(newest_minecraft)
+            and version_sort_key(current_pack_version) < version_sort_key(newest_pack_version)
+        )
+
+        settings = copy.deepcopy(entry.get("settings") or packping.get("remote_settings", {}))
         settings.setdefault("notifications", {})["showToast"] = True
         entry["settings"] = settings
-
-
-def minecraft_upgrade_changelog(newest_entry: dict[str, Any]) -> str:
-    minecraft = newest_entry.get("minecraft", "")
-    changelog = str(newest_entry.get("changelog", "")).strip()
-    header = f"Kernova is available for Minecraft {minecraft}."
-    return f"{header}\n\n{changelog}" if changelog else header
+        if has_newer_minecraft:
+            entry["upgradeMinecraft"] = newest_minecraft
+            entry["toast"] = minecraft_upgrade_toast(newest_entry, config, newest_minecraft)
+        else:
+            entry.pop("upgradeMinecraft", None)
+            entry.pop("toast", None)
+            settings.setdefault("notifications", {})["showToast"] = False
 
 
 def minecraft_upgrade_toast(entry: dict[str, Any], config: dict[str, Any], target_minecraft: str) -> dict[str, str]:

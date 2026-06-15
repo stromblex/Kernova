@@ -313,7 +313,7 @@ class PublishTests(TestCase):
                             "loader": "fabric",
                             "version": "0.1.0-beta",
                             "download": "old",
-                            "changelog": "old",
+                            "changelog": "old same-Minecraft changes",
                             "settings": {"notifications": {"showToast": False}},
                         }
                     ]
@@ -342,11 +342,97 @@ class PublishTests(TestCase):
             entries = json.loads(update_json.read_text())
             old_entry = next(item for item in entries if item["minecraft"] == "26.1")
             self.assertEqual(old_entry["upgradeMinecraft"], "26.1.1")
-            self.assertEqual(old_entry["version"], "0.1.1-beta")
-            self.assertEqual(old_entry["download"], "new")
+            self.assertEqual(old_entry["version"], "0.1.0-beta")
+            self.assertEqual(old_entry["download"], "old")
+            self.assertEqual(old_entry["changelog"], "old same-Minecraft changes")
             self.assertTrue(old_entry["settings"]["notifications"]["showToast"])
             self.assertEqual(old_entry["toast"]["title"], "Kernova is available for Minecraft 26.1.1")
             self.assertEqual(old_entry["toast"]["subtitle"], "0.1.1-beta on fabric")
+            newest_entry = next(item for item in entries if item["minecraft"] == "26.1.1")
+            self.assertNotIn("upgradeMinecraft", newest_entry)
+            self.assertNotIn("toast", newest_entry)
+            self.assertFalse(newest_entry["settings"]["notifications"]["showToast"])
+
+    def test_packping_minecraft_upgrade_notice_requires_higher_pack_version(self) -> None:
+        with TemporaryDirectory() as tmp:
+            update_json = Path(tmp) / "update.json"
+            update_json.write_text(
+                json.dumps(
+                    [
+                        {
+                            "minecraft": "26.1.1",
+                            "loader": "fabric",
+                            "version": "1.0.0-release",
+                            "download": "newer",
+                            "changelog": "newer same-Minecraft changes",
+                            "settings": {"notifications": {"showToast": False}},
+                        }
+                    ]
+                )
+            )
+            config = {
+                "packping": {
+                    "update_json": str(update_json),
+                    "toast_on_minecraft_upgrade": True,
+                    "minecraft_upgrade_toast": {
+                        "title": "Minecraft %minecraft%",
+                        "subtitle": "%pack_version% on %loader%",
+                    },
+                }
+            }
+            old_entry = {
+                "minecraft": "26.1",
+                "loader": "fabric",
+                "version": "1.0.1-release",
+                "download": "older",
+                "changelog": "older same-Minecraft changes",
+                "settings": {"notifications": {"showToast": False}},
+            }
+
+            publish.update_packping_json(old_entry, config)
+
+            entries = json.loads(update_json.read_text())
+            repackaged_old = next(item for item in entries if item["minecraft"] == "26.1")
+            self.assertEqual(repackaged_old["download"], "older")
+            self.assertEqual(repackaged_old["changelog"], "older same-Minecraft changes")
+            self.assertNotIn("upgradeMinecraft", repackaged_old)
+            self.assertNotIn("toast", repackaged_old)
+            self.assertFalse(repackaged_old["settings"]["notifications"]["showToast"])
+
+    def test_update_packping_json_does_not_downgrade_same_minecraft_build(self) -> None:
+        with TemporaryDirectory() as tmp:
+            update_json = Path(tmp) / "update.json"
+            update_json.write_text(
+                json.dumps(
+                    [
+                        {
+                            "minecraft": "26.1",
+                            "loader": "fabric",
+                            "version": "1.0.1-release",
+                            "download": "newer",
+                            "changelog": "newer changelog",
+                            "settings": {"notifications": {"showToast": False}},
+                        }
+                    ]
+                )
+            )
+            config = {"packping": {"update_json": str(update_json), "toast_on_minecraft_upgrade": True}}
+            old_entry = {
+                "minecraft": "26.1",
+                "loader": "fabric",
+                "version": "1.0.0-release",
+                "download": "older",
+                "changelog": "older changelog",
+                "settings": {"notifications": {"showToast": False}},
+            }
+
+            publish.update_packping_json(old_entry, config)
+
+            entries = json.loads(update_json.read_text())
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["version"], "1.0.1-release")
+            self.assertEqual(entries[0]["download"], "newer")
+            self.assertEqual(entries[0]["changelog"], "newer changelog")
 
     def test_packping_changelog_is_concise(self) -> None:
         manifest = {
@@ -368,11 +454,13 @@ class PublishTests(TestCase):
 
         changelog = publish.packping_changelog(manifest, publish.generated_changelog(manifest))
 
-        self.assertIn("Pack version: 0.1.0-beta (beta)", changelog)
-        self.assertIn("Mods: 2 available", changelog)
-        self.assertIn("Unavailable: ModernFix", changelog)
+        self.assertIn("New Kernova build for this Minecraft version.", changelog)
+        self.assertIn("See more on Download.", changelog)
+        self.assertNotIn("Pack version:", changelog)
+        self.assertNotIn("Mods:", changelog)
+        self.assertNotIn("Unavailable:", changelog)
         self.assertNotIn("### Mods", changelog)
-        self.assertLessEqual(len(changelog.splitlines()), 10)
+        self.assertLessEqual(len(changelog.splitlines()), 2)
 
     def test_update_packping_json_uses_platform_specific_file(self) -> None:
         with TemporaryDirectory() as tmp:
