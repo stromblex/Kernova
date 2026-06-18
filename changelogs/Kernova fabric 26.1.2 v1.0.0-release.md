@@ -1,5 +1,10 @@
 ## Kernova fabric 26.1.2 v1.0.0-release
 
+### Release Notes
+
+- Added Minecraft 26.1.2 support for the Fabric profile.
+- Updated the Fabric performance stack for 26.1.2; ThreadTweak remains unavailable upstream for this target.
+
 ### Build Details
 
 Minecraft 26.1.2 | fabric | 26/27 listed mods + 1 dependencies = 27 available

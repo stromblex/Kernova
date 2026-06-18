@@ -1,5 +1,10 @@
 ## Kernova neoforge 26.1.2 v0.1.0-beta
 
+### Release Notes
+
+- Added Minecraft 26.1.2 support for the NeoForge profile.
+- NeoForge now includes Entity Culling and ModernFix on 26.1.2; the build remains beta while Noisiumed, Smooth Boot, and WI Zoom wait on compatible files.
+
 ### Build Details
 
 Minecraft 26.1.2 | neoforge | 19/22 listed mods + 1 dependencies = 20 available
