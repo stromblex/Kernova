@@ -79,6 +79,26 @@
       "mod_count": 19,
       "skipped_count": 4,
       "mod_versions_hash": "aeb42d9d932bb7fc"
+    },
+    {
+      "build_name": "Kernova",
+      "minecraft_version": "26.1.1",
+      "loader": "fabric",
+      "pack_version": "1.0.1-release",
+      "timestamp": "2026-06-18T21:07:19.372073+00:00",
+      "mod_count": 27,
+      "skipped_count": 1,
+      "mod_versions_hash": "7b8eee5d3ac4b549"
+    },
+    {
+      "build_name": "Kernova",
+      "minecraft_version": "26.1.1",
+      "loader": "neoforge",
+      "pack_version": "0.1.1-beta",
+      "timestamp": "2026-06-18T21:07:57.116382+00:00",
+      "mod_count": 18,
+      "skipped_count": 5,
+      "mod_versions_hash": "8c94e6b73968e448"
     }
   ]
 }
