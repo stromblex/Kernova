@@ -993,7 +993,7 @@ class PublishTests(TestCase):
         upload_build.assert_called_once()
         sync_update_json.assert_not_called()
 
-    def test_release_stops_before_curseforge_when_real_modrinth_fails(self) -> None:
+    def test_release_continues_to_curseforge_when_real_modrinth_fails(self) -> None:
         args = Namespace(
             build=None,
             latest=True,
@@ -1009,16 +1009,18 @@ class PublishTests(TestCase):
         with (
             patch.object(publish, "build_dirs_from_args", return_value=[Path("build")]),
             patch.object(publish, "package_one_build"),
-            patch.object(publish, "upload_build", side_effect=[0, 1]) as upload_build,
-            patch.object(publish, "sync_update_json") as sync_update_json,
+            patch.object(publish, "upload_build", side_effect=[0, 1, 0]) as upload_build,
+            patch.object(publish, "sync_update_json", return_value=0) as sync_update_json,
         ):
             code = publish.release_build(args)
 
-        self.assertEqual(code, 1)
-        self.assertEqual(upload_build.call_count, 2)
+        self.assertEqual(code, 0)
+        self.assertEqual(upload_build.call_count, 3)
         self.assertTrue(upload_build.call_args_list[0].args[0].dry_run)
         self.assertEqual(upload_build.call_args_list[1].args[0].platform, "modrinth")
-        sync_update_json.assert_not_called()
+        self.assertEqual(upload_build.call_args_list[2].args[0].platform, "curseforge")
+        sync_update_json.assert_called_once()
+        self.assertEqual(sync_update_json.call_args.args[0].platform, "curseforge")
 
     def test_sync_update_json_copies_split_feeds_and_docs(self) -> None:
         with TemporaryDirectory() as tmp:

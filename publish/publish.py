@@ -45,6 +45,7 @@ PACKPING_PROJECT_URLS = {
     "modrinth": "https://modrinth.com/modpack/kernova",
     "curseforge": "https://www.curseforge.com/minecraft/modpacks/kernova",
 }
+PUBLISH_PLATFORMS = ("modrinth", "curseforge")
 GENERATED_NOTE_SECTIONS = {
     "build details",
     "mods",
@@ -52,6 +53,13 @@ GENERATED_NOTE_SECTIONS = {
     "auto dependencies",
     "unavailable",
 }
+
+
+class PackageOutcome:
+    def __init__(self) -> None:
+        self.successes: set[str] = set()
+        self.failures: dict[str, str] = {}
+        self.artifacts: dict[str, Path] = {}
 
 
 def load_json(path: Path, default: Any | None = None) -> Any:
@@ -136,6 +144,29 @@ def platform_dir(base: Path, manifest: dict[str, Any]) -> Path:
 
 def changelog_path(manifest: dict[str, Any]) -> Path:
     return CHANGELOGS_DIR / f"{build_display_name(manifest)}.md"
+
+
+def platform_changelog_path(manifest: dict[str, Any], platform: str) -> Path:
+    return CHANGELOGS_DIR / platform / f"{build_display_name(manifest)}.md"
+
+
+def read_changelog(manifest: dict[str, Any], platform: str) -> str:
+    platform_path = platform_changelog_path(manifest, platform)
+    if platform_path.exists():
+        return platform_path.read_text()
+    legacy_path = changelog_path(manifest)
+    if legacy_path.exists():
+        return legacy_path.read_text()
+    raise FileNotFoundError(platform_path)
+
+
+def selected_platforms(args: argparse.Namespace) -> list[str]:
+    platform = str(getattr(args, "platform", "both") or "both")
+    if platform == "both":
+        return list(PUBLISH_PLATFORMS)
+    if platform not in PUBLISH_PLATFORMS:
+        raise ValueError(f"Unknown platform: {platform}")
+    return [platform]
 
 
 def available_mods(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -378,9 +409,13 @@ def mod_version_label(mod: dict[str, Any]) -> str:
     return str(mod.get("version_number") or mod.get("filename") or "unknown")
 
 
-def compose_changelog(manifest: dict[str, Any], notes_file: str | None = None) -> str:
+def compose_changelog(
+    manifest: dict[str, Any],
+    notes_file: str | None = None,
+    platform: str | None = None,
+) -> str:
     generated = generated_changelog(manifest).strip()
-    manual_notes = read_manual_notes(manifest, notes_file)
+    manual_notes = read_manual_notes(manifest, notes_file, platform)
     if not manual_notes:
         return generated + "\n"
 
@@ -399,16 +434,26 @@ def compose_changelog(manifest: dict[str, Any], notes_file: str | None = None) -
     )
 
 
-def read_manual_notes(manifest: dict[str, Any], notes_file: str | None) -> str:
+def read_manual_notes(manifest: dict[str, Any], notes_file: str | None, platform: str | None = None) -> str:
     candidates: list[Path] = []
     if notes_file:
         candidates.append(project_path(notes_file))
+    if platform:
+        candidates.append(SCRIPT_DIR / "notes" / f"{manifest['minecraft_version']}-{manifest['loader']}-{platform}.md")
+        candidates.append(SCRIPT_DIR / "notes" / f"{manifest['minecraft_version']}-{platform}.md")
     candidates.append(SCRIPT_DIR / "notes" / f"{manifest['minecraft_version']}-{manifest['loader']}.md")
     candidates.append(SCRIPT_DIR / "notes" / f"{manifest['minecraft_version']}.md")
 
     for path in candidates:
         if path.exists():
             return sanitize_manual_notes(path.read_text())
+
+    if platform:
+        build_changelog = platform_changelog_path(manifest, platform)
+        if build_changelog.exists():
+            extracted = extract_release_notes(build_changelog.read_text())
+            if extracted:
+                return sanitize_manual_notes(extracted)
 
     build_changelog = CHANGELOGS_DIR / f"{build_display_name(manifest)}.md"
     if build_changelog.exists():
@@ -777,7 +822,7 @@ def curseforge_upload_metadata(
         + list(cf.get("loaders", {}).get(manifest["loader"], []))
     )
     metadata = {
-        "changelog": changelog_path(manifest).read_text().replace("\n", "\r\n"),
+        "changelog": read_changelog(manifest, "curseforge").replace("\n", "\r\n"),
         "changelogType": "markdown",
         "displayName": build_display_name(manifest),
         "gameVersions": game_versions,
@@ -1490,65 +1535,109 @@ def build_dirs_from_args(args: argparse.Namespace) -> list[Path]:
     return [build_dir_from_arg(args.build, args.latest, args.loader, args.mc)]
 
 
-def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_dir: Path) -> None:
+def package_one_build(args: argparse.Namespace, config: dict[str, Any], build_dir: Path) -> PackageOutcome:
     secrets = load_json(SECRETS_PATH, default={})
     manifest = load_manifest(build_dir)
+    platforms = selected_platforms(args)
+    outcome = PackageOutcome()
 
     modrinth_dir = platform_dir(MODRINTH_DIR, manifest)
     full_dir = platform_dir(FULL_DIR, manifest)
     prism_dir = platform_dir(PRISM_DIR, manifest)
     packping_dir = platform_dir(PACKPING_DIR, manifest)
-    changelog_file = changelog_path(manifest)
-    changelog_file.parent.mkdir(parents=True, exist_ok=True)
+    packping_platforms = packping_platform_names(config)
 
-    changelog = compose_changelog(manifest, args.notes_file)
-    feed_changelog = packping_changelog(manifest, changelog)
-    changelog_file.write_text(changelog)
+    if "modrinth" in platforms:
+        try:
+            changelog_file = platform_changelog_path(manifest, "modrinth")
+            changelog_file.parent.mkdir(parents=True, exist_ok=True)
+            changelog = compose_changelog(manifest, args.notes_file, "modrinth")
+            feed_changelog = packping_changelog(manifest, changelog)
 
-    mrpack = create_mrpack(build_dir, manifest, config, modrinth_dir, "modrinth")
-    curseforge_zip = create_curseforge_modpack_zip(
-        build_dir,
-        manifest,
-        config,
-        platform_dir(CURSEFORGE_DIR, manifest),
-        secrets,
-        "curseforge",
-    )
-    full_zip = create_full_zip(build_dir, manifest, full_dir, config, "modrinth")
-    prism_zip = create_prism_zip(build_dir, manifest, config, prism_dir, "modrinth")
-    packping_artifacts = {
-        "modrinth": mrpack.name,
-        "curseforge": curseforge_zip.name,
-    }
-    packping_entries = [
-        create_packping_entry(
-            manifest,
-            config,
-            packping_dir,
-            platform,
-            packping_artifacts.get(platform, mrpack.name),
-            feed_changelog,
-        )
-        for platform in packping_platform_names(config)
-    ]
+            mrpack = create_mrpack(build_dir, manifest, config, modrinth_dir, "modrinth")
+            full_zip = create_full_zip(build_dir, manifest, full_dir, config, "modrinth")
+            prism_zip = create_prism_zip(build_dir, manifest, config, prism_dir, "modrinth")
+            changelog_file.write_text(changelog)
+            outcome.successes.add("modrinth")
+            outcome.artifacts["modrinth"] = mrpack
+            outcome.artifacts["full"] = full_zip
+            outcome.artifacts["prism"] = prism_zip
 
-    print(f"[OK] Modrinth pack: {mrpack}")
-    print(f"[OK] CurseForge modpack zip: {curseforge_zip}")
-    print(f"[OK] Full test zip: {full_zip}")
-    print(f"[OK] Prism import zip: {prism_zip}")
-    print(f"[OK] Changelog: {changelog_file}")
-    for packping_entry in packping_entries:
-        print(f"[OK] PackPing entry: {packping_entry}")
-    
+            if "modrinth" in packping_platforms:
+                packping_entry = create_packping_entry(
+                    manifest,
+                    config,
+                    packping_dir,
+                    "modrinth",
+                    mrpack.name,
+                    feed_changelog,
+                )
+                print(f"[OK] PackPing entry: {packping_entry}")
+
+            print(f"[OK] Modrinth pack: {mrpack}")
+            print(f"[OK] Full test zip: {full_zip}")
+            print(f"[OK] Prism import zip: {prism_zip}")
+            print(f"[OK] Modrinth changelog: {changelog_file}")
+        except Exception as error:
+            outcome.failures["modrinth"] = str(error)
+            print(f"[ERROR] Modrinth package failed for {build_display_name(manifest)}: {error}")
+
+    if "curseforge" in platforms:
+        try:
+            changelog_file = platform_changelog_path(manifest, "curseforge")
+            changelog_file.parent.mkdir(parents=True, exist_ok=True)
+            changelog = compose_changelog(manifest, args.notes_file, "curseforge")
+            feed_changelog = packping_changelog(manifest, changelog)
+
+            curseforge_zip = create_curseforge_modpack_zip(
+                build_dir,
+                manifest,
+                config,
+                platform_dir(CURSEFORGE_DIR, manifest),
+                secrets,
+                "curseforge",
+            )
+            changelog_file.write_text(changelog)
+            outcome.successes.add("curseforge")
+            outcome.artifacts["curseforge"] = curseforge_zip
+
+            if "curseforge" in packping_platforms:
+                packping_entry = create_packping_entry(
+                    manifest,
+                    config,
+                    packping_dir,
+                    "curseforge",
+                    curseforge_zip.name,
+                    feed_changelog,
+                )
+                print(f"[OK] PackPing entry: {packping_entry}")
+
+            print(f"[OK] CurseForge modpack zip: {curseforge_zip}")
+            print(f"[OK] CurseForge changelog: {changelog_file}")
+        except Exception as error:
+            outcome.failures["curseforge"] = str(error)
+            print(f"[ERROR] CurseForge package failed for {build_display_name(manifest)}: {error}")
+
+    return outcome
 
 def package_build(args: argparse.Namespace) -> int:
     config = load_json(CONFIG_PATH)
+    hard_failure = False
+    partial_failures: dict[str, str] = {}
     try:
         build_dirs = build_dirs_from_args(args)
         for build_dir in build_dirs:
-            package_one_build(args, config, build_dir)
+            outcome = package_one_build(args, config, build_dir)
+            partial_failures.update(outcome.failures)
+            if not outcome.successes:
+                hard_failure = True
     except ValueError as error:
         print(f"[ERROR] {error}")
+        return 1
+    if partial_failures and not hard_failure:
+        failed = ", ".join(sorted(partial_failures))
+        print(f"[WARN] Package completed with pending platform(s): {failed}")
+    if hard_failure:
         return 1
     if args.sync_update:
         return sync_update_json(args, config)
@@ -1558,26 +1647,60 @@ def package_build(args: argparse.Namespace) -> int:
 def upload_build(args: argparse.Namespace) -> int:
     config = load_json(CONFIG_PATH)
     secrets = load_json(SECRETS_PATH, default={})
-    platforms = ["modrinth", "curseforge"] if args.platform == "both" else [args.platform]
+    platforms = selected_platforms(args)
+    build_dirs = build_dirs_from_args(args)
     ok = True
-    for build_dir in build_dirs_from_args(args):
+    success_counts: dict[str, int] = {platform: 0 for platform in platforms}
+    failed: set[str] = set()
+    for build_dir in build_dirs:
         manifest = load_manifest(build_dir)
-        needs_package = not platform_dir(MODRINTH_DIR, manifest).exists() or not changelog_path(manifest).exists()
-        if "curseforge" in platforms and not curseforge_upload_artifact(manifest, config).exists():
-            needs_package = True
-        if needs_package:
-            package_one_build(args, config, build_dir)
 
         for platform in platforms:
+            if platform_needs_package(manifest, config, platform):
+                package_args = copy.copy(args)
+                package_args.platform = platform
+                outcome = package_one_build(package_args, config, build_dir)
+                if platform not in outcome.successes:
+                    ok = False
+                    failed.add(platform)
+                    continue
+
             if platform == "modrinth":
-                ok = upload_modrinth(manifest, config, secrets, args.dry_run) and ok
+                uploaded = upload_modrinth(manifest, config, secrets, args.dry_run)
             elif platform == "curseforge":
-                ok = upload_curseforge(manifest, config, secrets, args.dry_run) and ok
+                uploaded = upload_curseforge(manifest, config, secrets, args.dry_run)
+            else:
+                uploaded = False
+
+            if uploaded:
+                success_counts[platform] += 1
+            else:
+                failed.add(platform)
+                ok = False
+    completed_platforms = [
+        platform for platform, count in success_counts.items()
+        if count == len(build_dirs)
+    ]
+    if failed and getattr(args, "platform", "both") == "both" and completed_platforms:
+        print(f"[WARN] Upload completed with pending platform(s): {', '.join(sorted(failed))}")
+        return 0
     return 0 if ok else 1
+
+
+def platform_needs_package(manifest: dict[str, Any], config: dict[str, Any], platform: str) -> bool:
+    if not platform_changelog_path(manifest, platform).exists() and not changelog_path(manifest).exists():
+        return True
+    if platform == "modrinth":
+        artifact = platform_dir(MODRINTH_DIR, manifest) / f"{artifact_slug(manifest)}.mrpack"
+        return not artifact.exists()
+    if platform == "curseforge":
+        return not curseforge_upload_artifact(manifest, config).exists()
+    raise ValueError(f"Unknown platform: {platform}")
 
 
 def release_build(args: argparse.Namespace) -> int:
     config = load_json(CONFIG_PATH)
+    platforms = selected_platforms(args)
     for build_dir in build_dirs_from_args(args):
         package_one_build(args, config, build_dir)
 
@@ -1587,26 +1710,25 @@ def release_build(args: argparse.Namespace) -> int:
         print("[ERROR] Release stopped: upload dry-run failed.")
         return 1
 
-    if args.platform == "both":
-        real_modrinth_args = copy.copy(args)
-        real_modrinth_args.dry_run = False
-        real_modrinth_args.platform = "modrinth"
-        if upload_build(real_modrinth_args) != 0:
-            print("[ERROR] Release stopped: real Modrinth upload failed.")
-            return 1
-
-        real_curseforge_args = copy.copy(args)
-        real_curseforge_args.dry_run = False
-        real_curseforge_args.platform = "curseforge"
-        if upload_build(real_curseforge_args) != 0:
-            print("[ERROR] Release stopped: real CurseForge upload failed.")
-            return 1
-    else:
+    released_platforms: list[str] = []
+    failed_platforms: list[str] = []
+    for platform in platforms:
         real_upload_args = copy.copy(args)
         real_upload_args.dry_run = False
+        real_upload_args.platform = platform
         if upload_build(real_upload_args) != 0:
-            print("[ERROR] Release stopped: real upload failed.")
-            return 1
+            failed_platforms.append(platform)
+            if args.platform != "both":
+                print(f"[ERROR] Release stopped: real {platform} upload failed.")
+                return 1
+            continue
+        released_platforms.append(platform)
+
+    if not released_platforms:
+        print("[ERROR] Release stopped: no platform uploaded successfully.")
+        return 1
+    if failed_platforms:
+        print(f"[WARN] Release completed with pending platform(s): {', '.join(failed_platforms)}")
 
     sync_args = argparse.Namespace(
         commit=True,
@@ -1615,6 +1737,7 @@ def release_build(args: argparse.Namespace) -> int:
         remote_file=args.remote_file,
         message=args.message,
         init_repo=args.init_repo,
+        platform=released_platforms[0] if len(released_platforms) == 1 else "both",
     )
     return sync_update_json(sync_args, config)
 
@@ -1629,7 +1752,7 @@ def upload_modrinth(
     token = secrets.get("modrinth_token", "")
     out_dir = platform_dir(MODRINTH_DIR, manifest)
     artifact = out_dir / f"{artifact_slug(manifest)}.mrpack"
-    changelog = changelog_path(manifest).read_text()
+    changelog = read_changelog(manifest, "modrinth")
     if not artifact.exists():
         print(f"[ERROR] Missing artifact: {artifact}")
         return False
@@ -1801,7 +1924,11 @@ def sync_update_json(args: argparse.Namespace, config: dict[str, Any] | None = N
         return 1
 
     synced_files: list[str] = []
-    for local_update, remote_file in packping_sync_targets(config, args.remote_file):
+    for local_update, remote_file in packping_sync_targets(
+        config,
+        args.remote_file,
+        getattr(args, "platform", "both"),
+    ):
         try:
             entries = load_packping_entries(local_update)
         except (OSError, json.JSONDecodeError, ValueError) as error:
@@ -1842,12 +1969,15 @@ def sync_update_json(args: argparse.Namespace, config: dict[str, Any] | None = N
 def packping_sync_targets(
     config: dict[str, Any],
     remote_file_override: str | None = None,
+    platform: str = "both",
 ) -> list[tuple[Path, str]]:
+    platforms = list(PUBLISH_PLATFORMS) if platform == "both" else [platform]
     if remote_file_override:
-        return [(packping_update_path(config, packping_platform_names(config)[0]), remote_file_override)]
+        return [(packping_update_path(config, platforms[0]), remote_file_override)]
     return [
-        (packping_update_path(config, platform), packping_remote_file(config, platform))
-        for platform in packping_platform_names(config)
+        (packping_update_path(config, name), packping_remote_file(config, name))
+        for name in packping_platform_names(config)
+        if name in platforms
     ]
 
 
@@ -2037,6 +2167,7 @@ def main() -> int:
 
     package_parser = sub.add_parser("package", help="Create mrpack, CurseForge zip, full zip, changelogs, PackPing entry")
     add_build_args(package_parser)
+    package_parser.add_argument("--platform", choices=["modrinth", "curseforge", "both"], default="both")
     package_parser.add_argument("--sync-update", action="store_true", help="Copy update.json to remote PackPing feed repo")
     package_parser.add_argument("--commit", action="store_true", help="Commit remote update JSON when used with --sync-update")
     package_parser.add_argument("--push", action="store_true", help="Push remote update repo when used with --sync-update --commit")
@@ -2071,6 +2202,7 @@ def main() -> int:
     release_parser.add_argument("--init-repo", action="store_true", help="Initialize remote update repo if it is missing .git")
 
     sync_parser = sub.add_parser("sync-update", help="Copy local update.json to the kernova-update repo")
+    sync_parser.add_argument("--platform", choices=["modrinth", "curseforge", "both"], default="both")
     sync_parser.add_argument("--commit", action="store_true", help="Commit update.json in the remote repo")
     sync_parser.add_argument("--push", action="store_true", help="Push the remote repo after committing")
     sync_parser.add_argument("--remote-repo", help="Override PackPing remote update repo path")
